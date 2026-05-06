@@ -6,6 +6,7 @@ edition = "2024"
 [lib]
 
 [dependencies]
-bevy.workspace = true
+bevy = { workspace = true, features = ["dev", "bevy_remote", "bevy_feathers"] }
+ehttp = "0.7.1"
 serde = "1.0.228"
 serde_json = "1.0.149"

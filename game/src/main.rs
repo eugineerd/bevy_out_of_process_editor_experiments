@@ -1,8 +1,7 @@
 use bevy::camera_controller::free_camera::FreeCameraPlugin;
-use bevy::feathers::controls::{ButtonProps, button};
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, observe};
-use jackdaw_sdk::runtime::out_of_process::{EditorBtn, EditorIntegrationPlugin, EditorSync};
+use editor_api::{EditorIntegrationPlugin, EditorSync};
 
 #[derive(Component)]
 pub struct DebugView;
@@ -38,35 +37,24 @@ fn show(mut gizmos: Gizmos, q: Query<&Transform, (With<DebugView>, Without<Camer
 }
 
 fn hello_world_system(mut commands: Commands) {
-    // commands.spawn(Camera2d::default());
     commands.spawn((
-        Camera3d::default(),
-        bevy::camera_controller::free_camera::FreeCamera::default(),
+        Camera2d::default(),
+        Camera {
+            order: 1,
+            ..Default::default()
+        },
+        // bevy::camera_controller::free_camera::FreeCamera::default(),
     ));
-    commands.spawn((
-        EditorSync {},
-        button(
-            ButtonProps {
-                ..Default::default()
-            },
-            (),
-            Spawn((Text::new("Normal"))),
-        ),
-        EditorBtn {},
-        GlobalZIndex(10000000),
-        observe(|_activate: On<Activate>| {
-            info!("Normal button clicked!");
-        }),
-    ));
+    commands.spawn((Camera2d::default(), IsDefaultUiCamera));
 }
 
-fn circle(mut gizmos: Gizmos, cursor_pos: Res<utils::CursorPos>, time: Res<Time>) {
+fn circle(mut gizmos: Gizmos, cursor_pos: Res<utils::CursorPos>) {
     gizmos.circle_2d(
         cursor_pos.world_pos,
         cursor_pos
             .window_normalized_pos
             .x
-            .remap(0.0, 1.0, 0.0, 50.0),
+            .remap(0.0, 1.0, 10.0, 10.0),
         Color::linear_rgb(1.0, 1.0, 0.5),
     );
 }

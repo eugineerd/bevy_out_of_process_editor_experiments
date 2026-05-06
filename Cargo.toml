@@ -1,20 +1,11 @@
-[package]
-name = "bevy-editor-experiments"
-version = "0.1.0"
-edition = "2024"
-
-[[bin]]
-name = "editor"
-path = "editor/src/main.rs"
-
-[[bin]]
-name = "game"
-path = "game/src/main.rs"
+# [package]
+# name = "bevy-editor-experiments"
+# version = "0.1.0"
+# edition = "2024"
 
 [workspace]
 members = ["editor", "editor-api", "game"]
+resolver = "3"
 
 [workspace.dependencies]
-bevy = { git = "https://github.com/bevyengine/bevy.git", branch = "main", features = [
-    "dev",
-] }
+bevy = { git = "https://github.com/bevyengine/bevy.git", rev = "15540493a688e162e56b4ad19b6055fc35e109aa" }

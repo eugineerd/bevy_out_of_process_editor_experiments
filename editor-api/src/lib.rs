@@ -15,7 +15,6 @@ use bevy::{
     remote::builtin_methods::{BrpDespawnEntityParams, BrpSpawnEntityParams},
 };
 use ehttp::Request;
-use jackdaw_jsn::SceneJsnAst;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,11 +26,11 @@ impl Plugin for EditorIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             RemotePlugin::default()
-                .with_method(
+                .with_method_main(
                     BRP_SEND_WINDOW_MESSAGE_METHOD,
                     process_window_message_request,
                 )
-                .with_method(
+                .with_method_main(
                     BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
                     process_trigger_activate_event_request,
                 ),
@@ -142,13 +141,8 @@ struct GameProcess {
 /// A response according to BRP.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BrpResponse {
-    /// This field is mandatory and must be set to `"2.0"`.
     pub jsonrpc: String,
-
-    /// The id of the original request.
     pub id: Option<serde_json::Value>,
-
-    /// The actual response payload.
     #[serde(flatten)]
     pub payload: BrpPayload,
 }
@@ -160,7 +154,6 @@ fn request<R: DeserializeOwned + core::fmt::Debug, T: Serialize + core::fmt::Deb
     // info!("req: {:?}", &v);
     let body = BrpRequest {
         id: None,
-        jsonrpc: "2.0".into(),
         method: method.into(),
         params: serde_json::to_value(v).unwrap().into(),
     };
@@ -326,7 +319,7 @@ fn spawn_editor_sync(world: &mut World) {
 }
 
 fn sync_world(world: &mut World) {
-    update_scene(&mut world.resource_mut::<SceneJsnAst>());
+    // update_scene(&mut world.resource_mut::<SceneJsnAst>());
     let mut game = world.resource_mut::<GameProcess>();
     if !game.initialized {
         game.initialized = true;
@@ -348,6 +341,7 @@ fn sync_world(world: &mut World) {
     }
 }
 
+/*
 pub fn update_scene(ast: &mut SceneJsnAst) {
     for &entity_idx in &ast.dirty_indices {
         let entity_jsn = &ast.nodes[entity_idx];
@@ -382,3 +376,4 @@ pub fn update_scene(ast: &mut SceneJsnAst) {
     }
     ast.dirty_indices.clear();
 }
+ */

@@ -5,7 +5,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(PreUpdate, cursor_pos_update.after(InputSystems));
 }
 
-#[derive(Reflect, Resource, Default)]
+#[derive(Reflect, Resource, Default, Debug)]
 #[reflect(Resource, Default)]
 pub struct CursorPos {
     pub world_pos: Vec2,
@@ -14,7 +14,7 @@ pub struct CursorPos {
 
 fn cursor_pos_update(
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), Without<IsDefaultUiCamera>>,
     mut cursor_pos: ResMut<CursorPos>,
 ) {
     let (camera, camera_transform) = *camera;
