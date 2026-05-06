@@ -1,0 +1,20 @@
+[package]
+name = "bevy-editor-experiments"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "editor"
+path = "editor/src/main.rs"
+
+[[bin]]
+name = "game"
+path = "game/src/main.rs"
+
+[workspace]
+members = ["editor", "editor-api", "game"]
+
+[workspace.dependencies]
+bevy = { git = "https://github.com/bevyengine/bevy.git", branch = "main", features = [
+    "dev",
+] }
