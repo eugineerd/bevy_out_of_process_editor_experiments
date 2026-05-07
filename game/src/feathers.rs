@@ -4,7 +4,6 @@ use bevy::{
     color::palettes,
     ecs::VariantDefaults,
     feathers::{
-        FeathersPlugins,
         constants::{fonts, icons},
         containers::*,
         controls::*,
@@ -88,6 +87,7 @@ fn demo_root() -> impl Scene {
             flex_direction: FlexDirection::Row,
             column_gap: px(8),
         }
+        editor_api::EditorSync {}
         TabGroup
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children[

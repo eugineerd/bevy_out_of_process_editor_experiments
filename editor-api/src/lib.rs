@@ -2,20 +2,16 @@ use bevy::platform::collections::HashMap;
 use bevy::remote::RemotePlugin;
 use bevy::remote::builtin_methods::{
     BRP_DESPAWN_COMPONENTS_METHOD, BRP_GET_COMPONENTS_METHOD, BRP_LIST_COMPONENTS_METHOD,
-    BRP_QUERY_METHOD, BRP_SPAWN_ENTITY_METHOD, BrpGetComponentsParams, BrpGetComponentsResponse,
-    BrpInsertComponentsParams, BrpListComponentsParams, BrpListComponentsResponse, BrpQueryParams,
-    BrpQueryResponse, BrpSpawnEntityResponse, process_remote_insert_components_request,
+    BRP_QUERY_METHOD, BrpGetComponentsParams, BrpGetComponentsResponse, BrpListComponentsParams,
+    BrpListComponentsResponse, BrpQueryParams, BrpQueryResponse,
 };
 use bevy::remote::http::RemoteHttpPlugin;
 use bevy::remote::{BrpPayload, BrpRequest};
 use bevy::ui_widgets::Activate;
 use bevy::window::{PrimaryWindow, WindowEvent};
-use bevy::{
-    prelude::*,
-    remote::builtin_methods::{BrpDespawnEntityParams, BrpSpawnEntityParams},
-};
+use bevy::{prelude::*, remote::builtin_methods::BrpDespawnEntityParams};
 use ehttp::Request;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, DeserializeSeed};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -44,7 +40,7 @@ impl Plugin for EditorIntegrationPlugin {
     }
 }
 
-#[derive(Component, Reflect, Serialize, Deserialize)]
+#[derive(Component, Reflect, Serialize, Deserialize, Default, Clone)]
 #[reflect(Component)]
 pub struct EditorSync {}
 
@@ -86,29 +82,29 @@ impl Plugin for OutOfProcessPlugin {
                     info!("sent");
                 },
             )
-            .add_observer(
-                |activate: On<Pointer<Click>>,
-                 q: Query<Entity, With<EditorSync>>,
-                 game: Res<GameProcess>| {
-                    info!("Listening to click");
-                    if !q.contains(activate.entity) {
-                        return;
-                    }
-                    let Some(target_entity) =
-                        game.reverse_entities_map.get(&activate.entity).copied()
-                    else {
-                        info!("Entity not found");
-                        return;
-                    };
-                    let _: () = request(
-                        BrpTriggerActivateEvent {
-                            entity: target_entity,
-                        },
-                        BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
-                    );
-                    info!("sent");
-                },
-            )
+            //     .add_observer(
+            //         |activate: On<Pointer<Click>>,
+            //          q: Query<Entity, With<EditorSync>>,
+            //          game: Res<GameProcess>| {
+            //             info!("Listening to click");
+            //             if !q.contains(activate.entity) {
+            //                 return;
+            //             }
+            //             let Some(target_entity) =
+            //                 game.reverse_entities_map.get(&activate.entity).copied()
+            //             else {
+            //                 info!("Entity not found");
+            //                 return;
+            //             };
+            //             let _: () = request(
+            //                 BrpTriggerActivateEvent {
+            //                     entity: target_entity,
+            //                 },
+            //                 BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
+            //             );
+            //             info!("sent");
+            //         },
+            //     )
             .add_systems(PostUpdate, sync_world);
     }
 }
@@ -283,30 +279,56 @@ fn spawn_editor_sync(world: &mut World) {
         if !errors.is_empty() {
             info!("{:?}", errors)
         }
-        if let Some(children_raw) = components.remove(Children::type_path()) {
+        let children = components.remove(Children::type_path());
+        if let Some(child_of_raw) = components.remove(ChildOf::type_path()) {
+            let child_of: ChildOf = serde_json::from_value(child_of_raw.clone()).unwrap();
+            let editor_child_of = entities_map[&child_of.0];
+            world.entity_mut(editor_child_of).add_child(editor_entity);
+        }
+        components.remove(bevy::scene::SceneComponentInfo::type_path());
+
+        let app_type_registry = world.resource::<AppTypeRegistry>().clone();
+        let type_registry = app_type_registry.read();
+        let mut scratch = bevy::ecs::bundle::BundleScratch::default();
+        let mut writer = scratch.writer();
+        for (component_path, component) in components {
+            let Some(component_type) = type_registry.get_with_type_path(&component_path) else {
+                continue;
+            };
+            let type_id = component_type.type_id();
+            let reflect_from_reflect = type_registry
+                .get_type_data::<ReflectFromReflect>(type_id)
+                .unwrap();
+            let reflect_component = type_registry
+                .get_type_data::<ReflectComponent>(type_id)
+                .unwrap();
+            let component_id = reflect_component.register_component(world);
+            let layout = world.components().get_info(component_id).unwrap().layout();
+            let reflected =
+                bevy::reflect::serde::TypedReflectDeserializer::new(component_type, &type_registry)
+                    .deserialize(&component)
+                    .unwrap();
+            let value = reflect_from_reflect
+                .from_reflect(reflected.as_partial_reflect())
+                .unwrap();
+            let value_ptr = std::ptr::NonNull::new(Box::into_raw(value).cast::<u8>()).unwrap();
+            unsafe {
+                writer.push_component_by_id(
+                    component_id,
+                    bevy::ptr::OwningPtr::new(value_ptr),
+                    layout,
+                );
+            }
+        }
+        unsafe {
+            writer.write(&mut world.entity_mut(editor_entity));
+        }
+        if let Some(children_raw) = children {
             let children: Vec<Entity> = serde_json::from_value(children_raw).unwrap();
             for child in children {
                 sync_entity(child, entities_map, world);
             }
         }
-        if let Some(child_of_raw) = components.remove(ChildOf::type_path()) {
-            let child_of: ChildOf = serde_json::from_value(child_of_raw.clone()).unwrap();
-            let editor_child_of = entities_map[&child_of.0];
-            world.entity_mut(editor_entity).add_child(editor_child_of);
-        }
-        world
-            .run_system_cached_with(
-                process_remote_insert_components_request,
-                Some(
-                    serde_json::to_value(BrpInsertComponentsParams {
-                        entity: editor_entity,
-                        components: components,
-                    })
-                    .unwrap(),
-                ),
-            )
-            .unwrap()
-            .unwrap();
     }
     let mut entities_map = core::mem::take(&mut world.resource_mut::<GameProcess>().entities_map);
     for row in resp {

@@ -1,7 +1,6 @@
 use bevy::camera_controller::free_camera::FreeCameraPlugin;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, observe};
-use editor_api::{EditorIntegrationPlugin, EditorSync};
+use editor_api::EditorIntegrationPlugin;
 
 #[derive(Component)]
 pub struct DebugView;
@@ -17,11 +16,6 @@ fn main() {
             utils::plugin,
             feathers::plugin,
         ))
-        // .add_plugins((
-        //     DefaultPlugins,
-        //     jackdaw_remote::JackdawRemotePlugin::default(),
-        // ))
-        //
         .add_systems(Startup, hello_world_system)
         .add_observer(|on: On<Add, Transform>, mut commands: Commands| {
             commands.entity(on.entity).insert(DebugView);
@@ -48,7 +42,14 @@ fn hello_world_system(mut commands: Commands) {
     commands.spawn((Camera2d::default(), IsDefaultUiCamera));
 }
 
-fn circle(mut gizmos: Gizmos, cursor_pos: Res<utils::CursorPos>) {
+fn circle(
+    mut gizmos: Gizmos,
+    cursor_pos: Res<utils::CursorPos>,
+    // mut m: MessageReader<bevy::input::keyboard::KeyboardInput>,
+) {
+    // if !m.is_empty() {
+    //     info!("{:?}", m.read().collect::<Vec<_>>())
+    // }
     gizmos.circle_2d(
         cursor_pos.world_pos,
         cursor_pos
