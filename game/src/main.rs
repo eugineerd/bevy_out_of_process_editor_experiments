@@ -10,7 +10,10 @@ mod utils;
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins
+                .build()
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<bevy::audio::AudioPlugin>(),
             EditorIntegrationPlugin::default(),
             FreeCameraPlugin,
             utils::plugin,

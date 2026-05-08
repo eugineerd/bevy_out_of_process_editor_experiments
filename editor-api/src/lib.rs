@@ -15,43 +15,8 @@ use serde::de::{DeserializeOwned, DeserializeSeed};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Default)]
-pub struct EditorIntegrationPlugin;
-
-impl Plugin for EditorIntegrationPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_plugins((
-            RemotePlugin::default()
-                .with_method_main(
-                    BRP_SEND_WINDOW_MESSAGE_METHOD,
-                    process_window_message_request,
-                )
-                .with_method_main(
-                    BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
-                    process_trigger_activate_event_request,
-                ),
-            RemoteHttpPlugin::default(),
-            bevy::feathers::FeathersPlugins,
-        ));
-    }
-
-    fn cleanup(&self, _app: &mut App) {
-        // TODO: modify schedules to be stop user code from execution
-    }
-}
-
-#[derive(Component, Reflect, Serialize, Deserialize, Default, Clone)]
-#[reflect(Component)]
-pub struct EditorSync {}
-
-#[derive(Component, Reflect, Serialize, Deserialize)]
-#[reflect(Component)]
-#[require(Button)]
-pub struct EditorBtn {}
-
-#[derive(Component, Reflect, Serialize, Deserialize)]
-#[reflect(Component)]
-pub struct SceneEntity {}
+mod server_side;
+pub use server_side::*;
 
 #[derive(Default)]
 pub struct OutOfProcessPlugin;
@@ -59,29 +24,29 @@ pub struct OutOfProcessPlugin;
 impl Plugin for OutOfProcessPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GameProcess>()
-            .add_observer(
-                |activate: On<Activate>,
-                 q: Query<Entity, With<EditorSync>>,
-                 game: Res<GameProcess>| {
-                    info!("Listening to activate");
-                    if !q.contains(activate.entity) {
-                        return;
-                    }
-                    let Some(target_entity) =
-                        game.reverse_entities_map.get(&activate.entity).copied()
-                    else {
-                        info!("Entity not found");
-                        return;
-                    };
-                    let _: () = request(
-                        BrpTriggerActivateEvent {
-                            entity: target_entity,
-                        },
-                        BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
-                    );
-                    info!("sent");
-                },
-            )
+            // .add_observer(
+            //     |activate: On<Activate>,
+            //      q: Query<Entity, With<EditorSync>>,
+            //      game: Res<GameProcess>| {
+            //         info!("Listening to activate");
+            //         if !q.contains(activate.entity) {
+            //             return;
+            //         }
+            //         let Some(target_entity) =
+            //             game.reverse_entities_map.get(&activate.entity).copied()
+            //         else {
+            //             info!("Entity not found");
+            //             return;
+            //         };
+            //         let _: () = request(
+            //             BrpTriggerActivateEvent {
+            //                 entity: target_entity,
+            //             },
+            //             BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
+            //         );
+            //         info!("sent");
+            //     },
+            // )
             //     .add_observer(
             //         |activate: On<Pointer<Click>>,
             //          q: Query<Entity, With<EditorSync>>,
@@ -164,49 +129,6 @@ fn request<R: DeserializeOwned + core::fmt::Debug, T: Serialize + core::fmt::Deb
         }
         bevy::remote::BrpPayload::Error(err) => panic!("{}", err.message),
     };
-}
-
-const BRP_SEND_WINDOW_MESSAGE_METHOD: &str = "world.send_window_message";
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-struct BrpSendWindowMessageParams {
-    messages: Vec<WindowEvent>,
-}
-
-fn process_window_message_request(
-    In(params): In<Option<Value>>,
-    mut message_writer: MessageWriter<WindowEvent>,
-    window: Single<&mut Window, With<PrimaryWindow>>,
-) -> bevy::remote::BrpResult {
-    let BrpSendWindowMessageParams { messages } =
-        bevy::remote::builtin_methods::parse_some(params)?;
-    let mut window = window.into_inner();
-    // window.focused = true;
-
-    message_writer.write_batch(messages.into_iter().inspect(|f| match f {
-        WindowEvent::CursorMoved(c) => window.set_physical_cursor_position(Some(c.position.into())),
-        _ => (),
-    }));
-
-    Ok(().into())
-}
-
-const BRP_TRIGGER_ACTIVATE_EVENT_METHOD: &str = "world.trigger_activate_event";
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-struct BrpTriggerActivateEvent {
-    entity: Entity,
-}
-
-fn process_trigger_activate_event_request(
-    In(params): In<Option<Value>>,
-    world: &mut World,
-) -> bevy::remote::BrpResult {
-    let BrpTriggerActivateEvent { entity } = bevy::remote::builtin_methods::parse_some(params)?;
-    info!("recv {:?}", entity);
-
-    world.trigger(Activate { entity });
-    Ok(().into())
 }
 
 fn reset_scene() {
@@ -346,7 +268,7 @@ fn sync_world(world: &mut World) {
     if !game.initialized {
         game.initialized = true;
         reset_scene();
-        spawn_editor_sync(world);
+        // spawn_editor_sync(world);
     }
     // let registry = world.resource::<AppTypeRegistry>().clone();
     // let registry = registry.read();
