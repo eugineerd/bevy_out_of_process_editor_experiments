@@ -8,25 +8,28 @@ use bevy::window::{PrimaryWindow, WindowEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::{EditorMsg, EditorProcess};
+
 #[derive(Default)]
 pub struct EditorIntegrationPlugin;
 
 impl Plugin for EditorIntegrationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((
-            RemotePlugin::default()
-                .with_method_main(
-                    BRP_SEND_WINDOW_MESSAGE_METHOD,
-                    process_window_message_request,
-                )
-                .with_method_main(
-                    BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
-                    process_trigger_activate_event_request,
-                ),
-            RemoteHttpPlugin::default(),
-            bevy::feathers::FeathersPlugins,
-        ))
-        .set_runner(runner);
+        app.init_resource::<EditorProcess>()
+            .add_plugins((
+                RemotePlugin::default()
+                    .with_method_main(
+                        BRP_SEND_WINDOW_MESSAGE_METHOD,
+                        process_window_message_request,
+                    )
+                    .with_method_main(
+                        BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
+                        process_trigger_activate_event_request,
+                    ),
+                RemoteHttpPlugin::default(),
+                bevy::feathers::FeathersPlugins,
+            ))
+            .set_runner(runner);
     }
 
     fn cleanup(&self, _app: &mut App) {
@@ -150,10 +153,23 @@ fn runner(mut app: App) -> AppExit {
 
     loop {
         app.update();
+        let mut proc = app.world_mut().resource_mut::<EditorProcess>();
+        loop {
+            let msg = proc.ipc.recv();
+            if let Some(msg) = msg {
+                info!("{msg:?}");
+                if let EditorMsg::NextFrame = msg {
+                    break;
+                }
+            }
+        }
+        // while let Some(msg) = proc.ipc.recv() {
+        //     info!("{:?}", msg);
+        // }
         if app.should_exit().is_some() {
             break;
         }
-        bevy::platform::thread::sleep(Duration::from_secs_f64(1.0 / 120.0));
+        // bevy::platform::thread::sleep(Duration::from_secs_f64(1.0 / 60.0));
     }
 
     AppExit::Success

@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use bevy::platform::collections::HashMap;
 use bevy::remote::RemotePlugin;
 use bevy::remote::builtin_methods::{
@@ -15,8 +17,11 @@ use serde::de::{DeserializeOwned, DeserializeSeed};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod ipc;
 mod server_side;
 pub use server_side::*;
+
+use crate::ipc::IpcChannel;
 
 #[derive(Default)]
 pub struct OutOfProcessPlugin;
@@ -93,10 +98,16 @@ pub fn launch_game_process() {
 }
 
 #[derive(Resource, Default)]
-struct GameProcess {
+pub struct GameProcess {
     initialized: bool,
     entities_map: HashMap<Entity, Entity>,
     reverse_entities_map: HashMap<Entity, Entity>,
+    ipc: IpcChannel<EditorMsg, GameMsg>,
+}
+
+#[derive(Resource, Default)]
+pub struct EditorProcess {
+    ipc: IpcChannel<GameMsg, EditorMsg>,
 }
 
 /// A response according to BRP.
@@ -151,7 +162,7 @@ fn reset_scene() {
     }
 }
 
-fn spawn_editor_sync(world: &mut World) {
+fn spawn_editor_sync(world: &mut World, game: &mut GameProcess) {
     let resp: BrpQueryResponse = request(
         BrpQueryParams {
             data: bevy::remote::builtin_methods::BrpQuery::default(),
@@ -163,6 +174,7 @@ fn spawn_editor_sync(world: &mut World) {
         },
         BRP_QUERY_METHOD,
     );
+
     fn sync_entity(
         game_entity: Entity,
         entities_map: &mut HashMap<Entity, Entity>,
@@ -252,37 +264,29 @@ fn spawn_editor_sync(world: &mut World) {
             }
         }
     }
-    let mut entities_map = core::mem::take(&mut world.resource_mut::<GameProcess>().entities_map);
     for row in resp {
         let game_entity = row.entity;
-        sync_entity(game_entity, &mut entities_map, world);
+        sync_entity(game_entity, &mut game.entities_map, world);
     }
-    let mut gp = world.resource_mut::<GameProcess>();
-    gp.entities_map = entities_map;
-    gp.reverse_entities_map = gp.entities_map.iter().map(|(k, v)| (*v, *k)).collect();
+    game.reverse_entities_map = game.entities_map.iter().map(|(k, v)| (*v, *k)).collect();
 }
 
 fn sync_world(world: &mut World) {
-    // update_scene(&mut world.resource_mut::<SceneJsnAst>());
-    let mut game = world.resource_mut::<GameProcess>();
-    if !game.initialized {
-        game.initialized = true;
-        reset_scene();
-        // spawn_editor_sync(world);
-    }
-    // let registry = world.resource::<AppTypeRegistry>().clone();
-    // let registry = registry.read();
-    let window_messages = world.resource::<Messages<WindowEvent>>();
-    let messages: Vec<_> = window_messages
-        .iter_current_update_messages()
-        .cloned()
-        .collect();
-    if !messages.is_empty() {
-        let _: () = request(
-            BrpSendWindowMessageParams { messages },
-            BRP_SEND_WINDOW_MESSAGE_METHOD,
-        );
-    }
+    world.resource_scope(|world, mut game: Mut<GameProcess>| {
+        // update_scene(&mut world.resource_mut::<SceneJsnAst>());
+        // if !game.initialized {
+        //     game.initialized = true;
+        //     reset_scene();
+        //     spawn_editor_sync(world, &mut *game);
+        // }
+        // let registry = world.resource::<AppTypeRegistry>().clone();
+        // let registry = registry.read();
+        let window_messages = world.resource::<Messages<WindowEvent>>();
+        for msg in window_messages.iter_current_update_messages() {
+            game.ipc.send(EditorMsg::WindowEvent(msg.clone()));
+        }
+        game.ipc.send(EditorMsg::NextFrame);
+    });
 }
 
 /*
@@ -321,3 +325,12 @@ pub fn update_scene(ast: &mut SceneJsnAst) {
     ast.dirty_indices.clear();
 }
  */
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EditorMsg {
+    NextFrame,
+    WindowEvent(WindowEvent),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GameMsg {}
