@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 
+use bevy::input::common_conditions;
 use bevy::platform::collections::HashMap;
+use bevy::platform::sync::Mutex;
 use bevy::remote::RemotePlugin;
 use bevy::remote::builtin_methods::{
     BRP_DESPAWN_COMPONENTS_METHOD, BRP_GET_COMPONENTS_METHOD, BRP_LIST_COMPONENTS_METHOD,
@@ -9,10 +11,11 @@ use bevy::remote::builtin_methods::{
 };
 use bevy::remote::http::RemoteHttpPlugin;
 use bevy::remote::{BrpPayload, BrpRequest};
+use bevy::tasks::{AsyncComputeTaskPool, ComputeTaskPool};
 use bevy::ui_widgets::Activate;
 use bevy::window::{PrimaryWindow, WindowEvent};
 use bevy::{prelude::*, remote::builtin_methods::BrpDespawnEntityParams};
-use ehttp::Request;
+use ipc_channel::ipc::{IpcOneShotServer, IpcReceiver, IpcSender};
 use serde::de::{DeserializeOwned, DeserializeSeed};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,86 +31,50 @@ pub struct OutOfProcessPlugin;
 
 impl Plugin for OutOfProcessPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GameProcess>()
-            // .add_observer(
-            //     |activate: On<Activate>,
-            //      q: Query<Entity, With<EditorSync>>,
-            //      game: Res<GameProcess>| {
-            //         info!("Listening to activate");
-            //         if !q.contains(activate.entity) {
-            //             return;
-            //         }
-            //         let Some(target_entity) =
-            //             game.reverse_entities_map.get(&activate.entity).copied()
-            //         else {
-            //             info!("Entity not found");
-            //             return;
-            //         };
-            //         let _: () = request(
-            //             BrpTriggerActivateEvent {
-            //                 entity: target_entity,
-            //             },
-            //             BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
-            //         );
-            //         info!("sent");
-            //     },
-            // )
-            //     .add_observer(
-            //         |activate: On<Pointer<Click>>,
-            //          q: Query<Entity, With<EditorSync>>,
-            //          game: Res<GameProcess>| {
-            //             info!("Listening to click");
-            //             if !q.contains(activate.entity) {
-            //                 return;
-            //             }
-            //             let Some(target_entity) =
-            //                 game.reverse_entities_map.get(&activate.entity).copied()
-            //             else {
-            //                 info!("Entity not found");
-            //                 return;
-            //             };
-            //             let _: () = request(
-            //                 BrpTriggerActivateEvent {
-            //                     entity: target_entity,
-            //                 },
-            //                 BRP_TRIGGER_ACTIVATE_EVENT_METHOD,
-            //             );
-            //             info!("sent");
-            //         },
-            //     )
-            .add_systems(PostUpdate, sync_world);
+        app.add_observer(start_game_process_observer)
+            .add_systems(
+                Update,
+                (|mut commands: Commands| {
+                    commands.trigger(StartGameProcess {});
+                })
+                .run_if(common_conditions::input_just_pressed(KeyCode::KeyU)),
+            )
+            .add_systems(PreUpdate, sync_world);
     }
 }
 
-pub fn launch_game_process() {
-    std::thread::spawn(|| {
-        let workdir = "/home/vscode/Projects/my_game";
-        std::process::Command::new("cargo build")
-            .current_dir(workdir)
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-        std::process::Command::new("/home/vscode/Projects/my_game/target/debug/my_game")
-            .current_dir(workdir)
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
+#[derive(Event)]
+pub struct StartGameProcess {}
+
+fn start_game_process_observer(_on: On<StartGameProcess>, mut commands: Commands) {
+    let path = "/workspaces/bevy-editor-experiments";
+    let (server, name) = IpcOneShotServer::<GameMsg>::new().unwrap();
+    let game_proc = std::process::Command::new("cargo")
+        .args(["run", "-p", "game"])
+        .current_dir(path)
+        .env(EDITOR_SERVER_NAME_VAR, name)
+        .spawn()
+        .unwrap();
+    let (reciver, first_msg) = server.accept().unwrap();
+    let GameMsg::Sender(sender) = first_msg;
+    commands.insert_resource(GameProcess {
+        initialized: false,
+        entities_map: Default::default(),
+        reverse_entities_map: Default::default(),
+        proc: game_proc,
+        to_game: sender,
+        from_game: Mutex::new(reciver),
     });
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct GameProcess {
     initialized: bool,
     entities_map: HashMap<Entity, Entity>,
     reverse_entities_map: HashMap<Entity, Entity>,
-    ipc: IpcChannel<EditorMsg, GameMsg>,
-}
-
-#[derive(Resource, Default)]
-pub struct EditorProcess {
-    ipc: IpcChannel<GameMsg, EditorMsg>,
+    proc: std::process::Child,
+    to_game: IpcSender<EditorMsg>,
+    from_game: Mutex<IpcReceiver<GameMsg>>,
 }
 
 /// A response according to BRP.
@@ -129,17 +96,18 @@ fn request<R: DeserializeOwned + core::fmt::Debug, T: Serialize + core::fmt::Deb
         method: method.into(),
         params: serde_json::to_value(v).unwrap().into(),
     };
-    let req = Request::post("http://127.0.0.1:15702", serde_json::to_vec(&body).unwrap());
-    let resp = ehttp::fetch_blocking(&req).unwrap();
-    let resp_value = serde_json::from_slice::<BrpResponse>(&resp.bytes).unwrap();
-    match resp_value.payload {
-        bevy::remote::BrpPayload::Result(value) => {
-            let response_value = serde_json::from_value::<R>(value).unwrap();
-            // info!("resp: {:?}", &response_value);
-            return response_value;
-        }
-        bevy::remote::BrpPayload::Error(err) => panic!("{}", err.message),
-    };
+    todo!();
+    // let req = Request::post("http://127.0.0.1:15702", serde_json::to_vec(&body).unwrap());
+    // let resp = ehttp::fetch_blocking(&req).unwrap();
+    // let resp_value = serde_json::from_slice::<BrpResponse>(&resp.bytes).unwrap();
+    // match resp_value.payload {
+    //     bevy::remote::BrpPayload::Result(value) => {
+    //         let response_value = serde_json::from_value::<R>(value).unwrap();
+    //         // info!("resp: {:?}", &response_value);
+    //         return response_value;
+    //     }
+    //     bevy::remote::BrpPayload::Error(err) => panic!("{}", err.message),
+    // };
 }
 
 fn reset_scene() {
@@ -272,7 +240,16 @@ fn spawn_editor_sync(world: &mut World, game: &mut GameProcess) {
 }
 
 fn sync_world(world: &mut World) {
-    world.resource_scope(|world, mut game: Mut<GameProcess>| {
+    world.run_system_cached(
+        move |game: Res<GameProcess>, mut msgs: MessageReader<WindowEvent>| {
+            for msg in msgs.read() {
+                game.to_game
+                    .send(EditorMsg::WindowEvent(msg.clone()))
+                    .unwrap();
+            }
+        },
+    );
+    world.try_resource_scope(|world, game: Mut<GameProcess>| {
         // update_scene(&mut world.resource_mut::<SceneJsnAst>());
         // if !game.initialized {
         //     game.initialized = true;
@@ -281,11 +258,13 @@ fn sync_world(world: &mut World) {
         // }
         // let registry = world.resource::<AppTypeRegistry>().clone();
         // let registry = registry.read();
-        let window_messages = world.resource::<Messages<WindowEvent>>();
-        for msg in window_messages.iter_current_update_messages() {
-            game.ipc.send(EditorMsg::WindowEvent(msg.clone()));
-        }
-        game.ipc.send(EditorMsg::NextFrame);
+        //
+        // let window_messages = world.resource::<Messages<WindowEvent>>();
+        // for msg in window_messages.iter_current_update_messages() {
+        //     info!("Sending: {msg:?}");
+        //     to_game.send(EditorMsg::WindowEvent(msg.clone())).unwrap();
+        // }
+        game.to_game.send(EditorMsg::NextFrame).unwrap();
     });
 }
 
@@ -326,11 +305,16 @@ pub fn update_scene(ast: &mut SceneJsnAst) {
 }
  */
 
+pub const EDITOR_SERVER_NAME_VAR: &'static str = "BEVY_EDITOR_SERVER_NAME";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorMsg {
     NextFrame,
+    Number(u32),
     WindowEvent(WindowEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GameMsg {}
+pub enum GameMsg {
+    Sender(IpcSender<EditorMsg>),
+}

@@ -1,5 +1,8 @@
+use bevy::camera::RenderTarget;
 use bevy::camera_controller::free_camera::FreeCameraPlugin;
+use bevy::feathers::FeathersPlugins;
 use bevy::prelude::*;
+use bevy::window::WindowRef;
 use editor_api::EditorIntegrationPlugin;
 
 #[derive(Component)]
@@ -14,6 +17,7 @@ fn main() {
                 .build()
                 .disable::<bevy::winit::WinitPlugin>()
                 .disable::<bevy::audio::AudioPlugin>(),
+            FeathersPlugins,
             EditorIntegrationPlugin::default(),
             FreeCameraPlugin,
             utils::plugin,
@@ -34,14 +38,14 @@ fn show(mut gizmos: Gizmos, q: Query<&Transform, (With<DebugView>, Without<Camer
 }
 
 fn hello_world_system(mut commands: Commands) {
-    commands.spawn((
-        Camera2d::default(),
-        Camera {
-            order: 1,
-            ..Default::default()
-        },
-        // bevy::camera_controller::free_camera::FreeCamera::default(),
-    ));
+    // commands.spawn((
+    //     Camera2d::default(),
+    //     Camera {
+    //         order: 1,
+    //         ..Default::default()
+    //     },
+    //     // bevy::camera_controller::free_camera::FreeCamera::default(),
+    // ));
     commands.spawn((Camera2d::default(), IsDefaultUiCamera));
 }
 

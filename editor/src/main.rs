@@ -1,4 +1,7 @@
-use bevy::{feathers::FeathersPlugins, prelude::*};
+use bevy::{
+    dev_tools::fps_overlay::FpsOverlayPlugin, diagnostic::FrameTimeDiagnosticsPlugin,
+    feathers::FeathersPlugins, prelude::*,
+};
 use editor_api::OutOfProcessPlugin;
 
 fn main() -> AppExit {
@@ -6,7 +9,13 @@ fn main() -> AppExit {
         .insert_resource(bevy::feathers::theme::UiTheme(
             bevy::feathers::dark_theme::create_dark_theme(),
         ))
-        .add_plugins((DefaultPlugins, OutOfProcessPlugin, FeathersPlugins))
+        .add_plugins((
+            DefaultPlugins,
+            OutOfProcessPlugin,
+            FeathersPlugins,
+            FrameTimeDiagnosticsPlugin::default(),
+            FpsOverlayPlugin::default(),
+        ))
         .add_systems(Startup, setup)
         .run()
 }
