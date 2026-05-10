@@ -1,8 +1,8 @@
-use bevy::camera::RenderTarget;
 use bevy::camera_controller::free_camera::FreeCameraPlugin;
+use bevy::dev_tools::fps_overlay::FpsOverlayPlugin;
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::feathers::FeathersPlugins;
 use bevy::prelude::*;
-use bevy::window::WindowRef;
 use editor_api::EditorIntegrationPlugin;
 
 #[derive(Component)]
@@ -19,44 +19,37 @@ fn main() {
                 .disable::<bevy::audio::AudioPlugin>(),
             FeathersPlugins,
             EditorIntegrationPlugin::default(),
+            FrameTimeDiagnosticsPlugin::default(),
+            FpsOverlayPlugin::default(),
             FreeCameraPlugin,
             utils::plugin,
             feathers::plugin,
         ))
         .add_systems(Startup, hello_world_system)
-        .add_observer(|on: On<Add, Transform>, mut commands: Commands| {
-            commands.entity(on.entity).insert(DebugView);
+        .add_systems(Update, |mut q: Query<&mut Transform, With<Sprite>>| {
+            q.single_mut().unwrap().rotate_z(0.1);
         })
-        .add_systems(Update, (show, circle))
+        .add_systems(Update, circle)
         .run();
 }
 
-fn show(mut gizmos: Gizmos, q: Query<&Transform, (With<DebugView>, Without<Camera>)>) {
-    for t in q {
-        gizmos.sphere(t.to_isometry(), 20.0, Color::WHITE);
-    }
-}
-
 fn hello_world_system(mut commands: Commands) {
-    // commands.spawn((
-    //     Camera2d::default(),
-    //     Camera {
-    //         order: 1,
-    //         ..Default::default()
-    //     },
-    //     // bevy::camera_controller::free_camera::FreeCamera::default(),
-    // ));
+    commands.spawn((
+        Camera2d::default(),
+        Camera {
+            order: 1,
+            ..Default::default()
+        },
+    ));
     commands.spawn((Camera2d::default(), IsDefaultUiCamera));
+    commands.spawn(Sprite {
+        color: Color::BLACK,
+        custom_size: vec2(50.0, 50.0).into(),
+        ..Default::default()
+    });
 }
 
-fn circle(
-    mut gizmos: Gizmos,
-    cursor_pos: Res<utils::CursorPos>,
-    // mut m: MessageReader<bevy::input::keyboard::KeyboardInput>,
-) {
-    // if !m.is_empty() {
-    //     info!("{:?}", m.read().collect::<Vec<_>>())
-    // }
+fn circle(mut gizmos: Gizmos, cursor_pos: Res<utils::CursorPos>) {
     gizmos.circle_2d(
         cursor_pos.world_pos,
         cursor_pos

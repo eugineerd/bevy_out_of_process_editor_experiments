@@ -13,8 +13,8 @@ fn main() -> AppExit {
             DefaultPlugins,
             OutOfProcessPlugin,
             FeathersPlugins,
-            FrameTimeDiagnosticsPlugin::default(),
-            FpsOverlayPlugin::default(),
+            // FrameTimeDiagnosticsPlugin::default(),
+            // FpsOverlayPlugin::default(),
         ))
         .add_systems(Startup, setup)
         .run()

@@ -1,30 +1,27 @@
-use std::marker::PhantomData;
+use bevy::platform::sync::Arc;
+use std::time::Duration;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::input::common_conditions;
 use bevy::platform::collections::HashMap;
 use bevy::platform::sync::Mutex;
-use bevy::remote::RemotePlugin;
 use bevy::remote::builtin_methods::{
     BRP_DESPAWN_COMPONENTS_METHOD, BRP_GET_COMPONENTS_METHOD, BRP_LIST_COMPONENTS_METHOD,
     BRP_QUERY_METHOD, BrpGetComponentsParams, BrpGetComponentsResponse, BrpListComponentsParams,
     BrpListComponentsResponse, BrpQueryParams, BrpQueryResponse,
 };
-use bevy::remote::http::RemoteHttpPlugin;
 use bevy::remote::{BrpPayload, BrpRequest};
-use bevy::tasks::{AsyncComputeTaskPool, ComputeTaskPool};
-use bevy::ui_widgets::Activate;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::renderer::RenderDevice;
 use bevy::window::{PrimaryWindow, WindowEvent};
 use bevy::{prelude::*, remote::builtin_methods::BrpDespawnEntityParams};
 use ipc_channel::ipc::{IpcOneShotServer, IpcReceiver, IpcSender};
 use serde::de::{DeserializeOwned, DeserializeSeed};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 mod ipc;
 mod server_side;
 pub use server_side::*;
-
-use crate::ipc::IpcChannel;
 
 #[derive(Default)]
 pub struct OutOfProcessPlugin;
@@ -56,14 +53,28 @@ fn start_game_process_observer(_on: On<StartGameProcess>, mut commands: Commands
         .spawn()
         .unwrap();
     let (reciver, first_msg) = server.accept().unwrap();
-    let GameMsg::Sender(sender) = first_msg;
+    let GameMsg::Sender(sender) = first_msg else {
+        panic!("Not Sender")
+    };
+    let msg_queue = Arc::new(Mutex::new(Vec::new()));
+    std::thread::spawn({
+        let msg_queue = msg_queue.clone();
+        move || {
+            loop {
+                let msg = reciver.recv().unwrap();
+                let mut queue = msg_queue.lock().unwrap();
+                queue.push(msg);
+            }
+        }
+    });
     commands.insert_resource(GameProcess {
         initialized: false,
         entities_map: Default::default(),
         reverse_entities_map: Default::default(),
         proc: game_proc,
         to_game: sender,
-        from_game: Mutex::new(reciver),
+        // from_game: Mutex::new(reciver),
+        msg_queue,
     });
 }
 
@@ -74,7 +85,8 @@ pub struct GameProcess {
     reverse_entities_map: HashMap<Entity, Entity>,
     proc: std::process::Child,
     to_game: IpcSender<EditorMsg>,
-    from_game: Mutex<IpcReceiver<GameMsg>>,
+    // from_game: Mutex<IpcReceiver<GameMsg>>,
+    msg_queue: Arc<Mutex<Vec<GameMsg>>>,
 }
 
 /// A response according to BRP.
@@ -240,32 +252,69 @@ fn spawn_editor_sync(world: &mut World, game: &mut GameProcess) {
 }
 
 fn sync_world(world: &mut World) {
-    world.run_system_cached(
-        move |game: Res<GameProcess>, mut msgs: MessageReader<WindowEvent>| {
-            for msg in msgs.read() {
-                game.to_game
-                    .send(EditorMsg::WindowEvent(msg.clone()))
-                    .unwrap();
-            }
-        },
-    );
-    world.try_resource_scope(|world, game: Mut<GameProcess>| {
-        // update_scene(&mut world.resource_mut::<SceneJsnAst>());
-        // if !game.initialized {
-        //     game.initialized = true;
-        //     reset_scene();
-        //     spawn_editor_sync(world, &mut *game);
-        // }
-        // let registry = world.resource::<AppTypeRegistry>().clone();
-        // let registry = registry.read();
-        //
-        // let window_messages = world.resource::<Messages<WindowEvent>>();
-        // for msg in window_messages.iter_current_update_messages() {
-        //     info!("Sending: {msg:?}");
-        //     to_game.send(EditorMsg::WindowEvent(msg.clone())).unwrap();
-        // }
-        game.to_game.send(EditorMsg::NextFrame).unwrap();
-    });
+    if !world.contains_resource::<GameProcess>() {
+        return;
+    }
+    world
+        .run_system_cached(
+            move |mut commands: Commands,
+                  mut game: ResMut<GameProcess>,
+                  mut msgs: MessageReader<WindowEvent>,
+                  mut images: ResMut<Assets<Image>>,
+                  mut sprites: Query<&mut Sprite>,
+                  window: Single<&Window, With<PrimaryWindow>>,
+                  mut msg_queue: Local<Vec<GameMsg>>,
+                  keys: Res<ButtonInput<KeyCode>>| {
+                game.to_game.send(EditorMsg::NextFrame).unwrap();
+                let game = &mut *game;
+                core::mem::swap(&mut *game.msg_queue.lock().unwrap(), &mut msg_queue);
+                for msg in msg_queue.drain(..) {
+                    match msg {
+                        GameMsg::Image(items) => {
+                            let width = RenderDevice::align_copy_bytes_per_row(
+                                window.physical_width() as usize,
+                            ) as u32;
+                            let image = images.add(Image::new(
+                                Extent3d {
+                                    width,
+                                    height: window.physical_height(),
+                                    depth_or_array_layers: 1,
+                                },
+                                TextureDimension::D2,
+                                items,
+                                TextureFormat::Rgba8UnormSrgb,
+                                RenderAssetUsages::RENDER_WORLD,
+                            ));
+                            if !game.initialized {
+                                commands.spawn(Sprite {
+                                    image: image,
+                                    // custom_size: vec2(500.0, 500.0).into(),
+                                    ..Default::default()
+                                });
+                                game.initialized = true;
+                            } else {
+                                let mut sprite = sprites.single_mut().unwrap();
+                                images.remove(&sprite.image);
+                                sprite.image = image;
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+                for msg in msgs.read() {
+                    game.to_game
+                        .send(EditorMsg::WindowEvent(msg.clone()))
+                        .unwrap();
+                }
+                if keys.just_pressed(KeyCode::KeyP) {
+                    game.to_game.send(EditorMsg::Pause).unwrap();
+                }
+                if keys.just_pressed(KeyCode::KeyO) {
+                    game.to_game.send(EditorMsg::Continue).unwrap();
+                }
+            },
+        )
+        .unwrap();
 }
 
 /*
@@ -310,11 +359,13 @@ pub const EDITOR_SERVER_NAME_VAR: &'static str = "BEVY_EDITOR_SERVER_NAME";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorMsg {
     NextFrame,
-    Number(u32),
     WindowEvent(WindowEvent),
+    Pause,
+    Continue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameMsg {
     Sender(IpcSender<EditorMsg>),
+    Image(Vec<u8>),
 }
