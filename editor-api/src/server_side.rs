@@ -47,7 +47,7 @@ impl Plugin for EditorIntegrationPlugin {
     }
 
     fn cleanup(&self, _app: &mut App) {
-        // TODO: modify schedules to be stop user code from execution
+        // TODO: modify schedules to stop user code from execution
     }
 }
 
@@ -196,7 +196,10 @@ fn runner(mut app: App) -> AppExit {
 }
 
 #[derive(Resource, Default)]
-pub struct RenderTargets(EntityHashMap<(RenderTarget, EntityHashSet)>);
+pub struct RenderTargets {
+    windows: EntityHashMap<RenderTarget>,
+    cameras: EntityHashMap<RenderTarget>,
+}
 
 fn targets_last(
     mut cameras: Query<(Entity, &mut RenderTarget), With<Camera>>,
@@ -211,54 +214,62 @@ fn targets_last(
         if let RenderTarget::Window(window_ref) = *render_target
             && let Some(window_e) = window_ref.normalize(primary_window)
         {
-            let (old_render_target, cams) =
-                targets.0.entry(window_e.entity()).or_insert_with(|| {
-                    let id = loop {
-                        let id = ManualTextureViewHandle(rand::random::<u32>());
-                        if !manual_texture_views.contains_key(&id) {
-                            break id;
-                        }
-                    };
-                    let texture = unsafe {
-                        let texture = crate::external_texture::create_exportable_texture(
-                            device.wgpu_device(),
-                            &wgpu::wgt::TextureDescriptor {
-                                label: None,
-                                size: Extent3d {
-                                    width: 1280,
-                                    height: 700,
-                                    depth_or_array_layers: 1,
+            let targets = targets.as_mut();
+            if !targets.cameras.contains_key(&cam_e) {
+                let replacement_render_target =
+                    targets.windows.entry(window_e.entity()).or_insert_with(|| {
+                        let id = loop {
+                            let id = ManualTextureViewHandle(rand::random::<u32>());
+                            if !manual_texture_views.contains_key(&id) {
+                                break id;
+                            }
+                        };
+                        let texture = unsafe {
+                            let texture = crate::external_texture::create_exportable_texture(
+                                device.wgpu_device(),
+                                &wgpu::wgt::TextureDescriptor {
+                                    label: None,
+                                    size: Extent3d {
+                                        width: 1280,
+                                        height: 700,
+                                        depth_or_array_layers: 1,
+                                    },
+                                    mip_level_count: 1,
+                                    sample_count: 1,
+                                    dimension: TextureDimension::D2,
+                                    format: TextureFormat::Rgba8UnormSrgb,
+                                    usage: TextureUsages::RENDER_ATTACHMENT
+                                        | TextureUsages::COPY_SRC
+                                        | TextureUsages::TEXTURE_BINDING,
+                                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
                                 },
-                                mip_level_count: 1,
-                                sample_count: 1,
-                                dimension: TextureDimension::D2,
-                                format: TextureFormat::Rgba8UnormSrgb,
-                                usage: TextureUsages::RENDER_ATTACHMENT
-                                    | TextureUsages::COPY_SRC
-                                    | TextureUsages::TEXTURE_BINDING,
-                                view_formats: &[TextureFormat::Rgba8UnormSrgb],
-                            },
-                        )
-                        .unwrap();
-                        let (fd, meta) =
-                            crate::external_texture::export_texture(device.wgpu_device(), &texture)
-                                .unwrap();
-                        core::mem::forget(fd);
-                        sender.to_editor.send(GameMsg::Image(meta)).unwrap();
-                        texture
-                    };
-                    let view = texture.create_view(&wgpu::wgt::TextureViewDescriptor {
-                        ..Default::default()
-                    });
-                    core::mem::forget(texture);
+                            )
+                            .unwrap();
+                            let (fd, meta) = crate::external_texture::export_texture(
+                                device.wgpu_device(),
+                                &texture,
+                            )
+                            .unwrap();
+                            core::mem::forget(fd);
+                            sender.to_editor.send(GameMsg::Image(meta)).unwrap();
+                            texture
+                        };
+                        let view = texture.create_view(&wgpu::wgt::TextureViewDescriptor {
+                            ..Default::default()
+                        });
+                        core::mem::forget(texture);
 
-                    let texture_view =
-                        ManualTextureView::with_default_format(view.into(), uvec2(1280, 700));
-                    manual_texture_views.insert(id.clone(), texture_view);
-                    (RenderTarget::TextureView(id), Default::default())
-                });
-            cams.insert(cam_e);
-            core::mem::swap(&mut *render_target, old_render_target);
+                        let texture_view =
+                            ManualTextureView::with_default_format(view.into(), uvec2(1280, 700));
+                        manual_texture_views.insert(id.clone(), texture_view);
+                        RenderTarget::TextureView(id)
+                    });
+                targets
+                    .cameras
+                    .insert(cam_e, replacement_render_target.clone());
+            }
+            let replacement_render_target = targets.cameras.get_mut(&cam_e).unwrap();
+            core::mem::swap(&mut *render_target, replacement_render_target);
         };
     }
 }
@@ -267,14 +278,9 @@ fn targets_first(
     mut cameras: Query<&mut RenderTarget, With<Camera>>,
     mut targets: ResMut<RenderTargets>,
 ) {
-    for (e, (old_render_target, cams)) in targets.0.iter_mut() {
-        for cam in cams.iter() {
-            if let Ok(mut render_target) = cameras.get_mut(*cam) {
-                core::mem::swap(&mut *render_target, old_render_target);
-            }
+    for (cam_e, render_target) in targets.cameras.iter_mut() {
+        if let Ok(mut replacement_render_target) = cameras.get_mut(*cam_e) {
+            core::mem::swap(render_target, &mut replacement_render_target);
         }
     }
 }
-
-#[derive(Resource, Deref)]
-struct RenderWorldSender(IpcSender<GameMsg>);

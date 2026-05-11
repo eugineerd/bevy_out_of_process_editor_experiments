@@ -13,12 +13,9 @@ mod utils;
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins
-                .build()
-                .disable::<bevy::winit::WinitPlugin>()
-                .disable::<bevy::audio::AudioPlugin>(),
-            FeathersPlugins,
+            DefaultPlugins,
             EditorIntegrationPlugin::default(),
+            FeathersPlugins,
             FrameTimeDiagnosticsPlugin::default(),
             FpsOverlayPlugin::default(),
             FreeCameraPlugin,
@@ -34,13 +31,13 @@ fn main() {
 }
 
 fn hello_world_system(mut commands: Commands) {
-    // commands.spawn((
-    //     Camera2d::default(),
-    //     Camera {
-    //         order: 1,
-    //         ..Default::default()
-    //     },
-    // ));
+    commands.spawn((
+        Camera2d::default(),
+        Camera {
+            order: 1,
+            ..Default::default()
+        },
+    ));
     commands.spawn((Camera2d::default(), IsDefaultUiCamera));
     commands.spawn(Sprite {
         color: Color::BLACK,
