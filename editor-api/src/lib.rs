@@ -433,6 +433,7 @@ pub const EDITOR_SERVER_NAME_VAR: &'static str = "BEVY_EDITOR_SERVER_NAME";
 pub enum EditorMsg {
     NextFrame,
     WindowEvent(WindowEvent),
+    Exit,
     Pause,
     Continue,
 }

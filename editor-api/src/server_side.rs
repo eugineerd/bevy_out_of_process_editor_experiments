@@ -69,7 +69,15 @@ impl Default for EditorProcess {
             let msg_queue = msg_queue.clone();
             move || {
                 loop {
-                    let msg = reciever.recv().unwrap();
+                    let msg = match reciever.recv() {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            error!("{err}");
+                            let mut queue = msg_queue.lock().unwrap();
+                            queue.push(EditorMsg::Exit);
+                            break;
+                        }
+                    };
                     let mut queue = msg_queue.lock().unwrap();
                     queue.push(msg);
                 }
@@ -168,6 +176,7 @@ fn runner(mut app: App) -> AppExit {
     app.cleanup();
 
     let mut paused = false;
+    let mut exit = false;
     loop {
         app.world_mut()
             .resource_scope(|world, editor: Mut<EditorProcess>| {
@@ -180,13 +189,14 @@ fn runner(mut app: App) -> AppExit {
                             .unwrap(),
                         EditorMsg::Pause => paused = true,
                         EditorMsg::Continue => paused = false,
+                        EditorMsg::Exit => exit = true,
                     }
                 }
             });
         if !paused {
             app.update();
         }
-        if app.should_exit().is_some() {
+        if exit || app.should_exit().is_some() {
             break;
         }
         // bevy::platform::thread::sleep(std::time::Duration::from_secs_f64(1.0 / 60.0));
