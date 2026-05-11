@@ -34,13 +34,13 @@ fn main() {
 }
 
 fn hello_world_system(mut commands: Commands) {
-    commands.spawn((
-        Camera2d::default(),
-        Camera {
-            order: 1,
-            ..Default::default()
-        },
-    ));
+    // commands.spawn((
+    //     Camera2d::default(),
+    //     Camera {
+    //         order: 1,
+    //         ..Default::default()
+    //     },
+    // ));
     commands.spawn((Camera2d::default(), IsDefaultUiCamera));
     commands.spawn(Sprite {
         color: Color::BLACK,

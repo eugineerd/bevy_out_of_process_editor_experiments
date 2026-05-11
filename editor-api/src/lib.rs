@@ -1,5 +1,7 @@
+use std::os::fd::{OwnedFd, RawFd};
+
+use bevy::image::ImageSampler;
 use bevy::platform::sync::Arc;
-use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::input::common_conditions;
@@ -11,17 +13,26 @@ use bevy::remote::builtin_methods::{
     BrpListComponentsResponse, BrpQueryParams, BrpQueryResponse,
 };
 use bevy::remote::{BrpPayload, BrpRequest};
+use bevy::render::extract_resource::ExtractResource;
+use bevy::render::render_asset::{RenderAsset, RenderAssets};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::renderer::RenderDevice;
+use bevy::render::renderer::{RenderDevice, RenderQueue};
+use bevy::render::texture::{DefaultImageSampler, GpuImage};
+use bevy::render::{Extract, Render, RenderApp, RenderSystems};
+use bevy::sprite_render::Material2d;
+use bevy::ui_render::extract_uinode_images;
 use bevy::window::{PrimaryWindow, WindowEvent};
 use bevy::{prelude::*, remote::builtin_methods::BrpDespawnEntityParams};
-use ipc_channel::ipc::{IpcOneShotServer, IpcReceiver, IpcSender};
+use ipc_channel::ipc::{IpcOneShotServer, IpcSender};
+use rustix::process::{Pid, PidfdFlags};
 use serde::de::{DeserializeOwned, DeserializeSeed};
 use serde::{Deserialize, Serialize};
 
+mod external_texture;
 mod ipc;
 mod server_side;
 pub use server_side::*;
+use wgpu::TextureViewDescriptor;
 
 #[derive(Default)]
 pub struct OutOfProcessPlugin;
@@ -29,6 +40,7 @@ pub struct OutOfProcessPlugin;
 impl Plugin for OutOfProcessPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(start_game_process_observer)
+            .init_resource::<ImagesS>()
             .add_systems(
                 Update,
                 (|mut commands: Commands| {
@@ -38,12 +50,41 @@ impl Plugin for OutOfProcessPlugin {
             )
             .add_systems(PreUpdate, sync_world);
     }
+
+    fn finish(&self, app: &mut App) {
+        app.sub_app_mut(RenderApp)
+            .add_systems(
+                ExtractSchedule,
+                |imagess: Extract<Res<ImagesS>>, mut commands: Commands| {
+                    commands.insert_resource(imagess.clone());
+                },
+            )
+            .add_systems(
+                Render,
+                (|imagess: Res<ImagesS>, mut gpu_images: ResMut<RenderAssets<GpuImage>>| {
+                    for (k, v) in imagess.0.iter() {
+                        if let Some(image) = gpu_images.get_mut(k) {
+                            let texture: bevy::render::render_resource::Texture = v.clone().into();
+                            let texture_view =
+                                texture.create_view(&TextureViewDescriptor::default());
+                            image.texture = texture;
+                            image.texture_view = texture_view;
+                        }
+                    }
+                })
+                .in_set(RenderSystems::PrepareResources),
+            );
+    }
 }
 
 #[derive(Event)]
 pub struct StartGameProcess {}
 
-fn start_game_process_observer(_on: On<StartGameProcess>, mut commands: Commands) {
+fn start_game_process_observer(
+    _on: On<StartGameProcess>,
+    mut commands: Commands,
+    game: Option<ResMut<GameProcess>>,
+) {
     let path = "/workspaces/bevy-editor-experiments";
     let (server, name) = IpcOneShotServer::<GameMsg>::new().unwrap();
     let game_proc = std::process::Command::new("cargo")
@@ -61,13 +102,19 @@ fn start_game_process_observer(_on: On<StartGameProcess>, mut commands: Commands
         let msg_queue = msg_queue.clone();
         move || {
             loop {
-                let msg = reciver.recv().unwrap();
+                let msg = match reciver.recv() {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        error!("{err}");
+                        break;
+                    }
+                };
                 let mut queue = msg_queue.lock().unwrap();
                 queue.push(msg);
             }
         }
     });
-    commands.insert_resource(GameProcess {
+    let game_proc = GameProcess {
         initialized: false,
         entities_map: Default::default(),
         reverse_entities_map: Default::default(),
@@ -75,7 +122,13 @@ fn start_game_process_observer(_on: On<StartGameProcess>, mut commands: Commands
         to_game: sender,
         // from_game: Mutex::new(reciver),
         msg_queue,
-    });
+    };
+    if let Some(mut game) = game {
+        game.proc.kill().unwrap();
+        *game = game_proc;
+    } else {
+        commands.insert_resource(game_proc);
+    }
 }
 
 #[derive(Resource)]
@@ -251,6 +304,9 @@ fn spawn_editor_sync(world: &mut World, game: &mut GameProcess) {
     game.reverse_entities_map = game.entities_map.iter().map(|(k, v)| (*v, *k)).collect();
 }
 
+#[derive(Default, Resource, ExtractResource, Clone)]
+struct ImagesS(HashMap<Handle<Image>, wgpu::Texture>);
+
 fn sync_world(world: &mut World) {
     if !world.contains_resource::<GameProcess>() {
         return;
@@ -262,41 +318,58 @@ fn sync_world(world: &mut World) {
                   mut msgs: MessageReader<WindowEvent>,
                   mut images: ResMut<Assets<Image>>,
                   mut sprites: Query<&mut Sprite>,
-                  window: Single<&Window, With<PrimaryWindow>>,
+                  //   window: Single<&Window, With<PrimaryWindow>>,
+                  mut imagess: ResMut<ImagesS>,
                   mut msg_queue: Local<Vec<GameMsg>>,
+                  device: Res<RenderDevice>,
                   keys: Res<ButtonInput<KeyCode>>| {
                 game.to_game.send(EditorMsg::NextFrame).unwrap();
                 let game = &mut *game;
                 core::mem::swap(&mut *game.msg_queue.lock().unwrap(), &mut msg_queue);
                 for msg in msg_queue.drain(..) {
                     match msg {
-                        GameMsg::Image(items) => {
-                            let width = RenderDevice::align_copy_bytes_per_row(
-                                window.physical_width() as usize,
-                            ) as u32;
-                            let image = images.add(Image::new(
+                        GameMsg::Image(meta) => {
+                            info!("Got image: {meta:?}");
+                            let game_pid = Pid::from_child(&game.proc);
+                            let game_fd =
+                                rustix::process::pidfd_open(game_pid, PidfdFlags::empty()).unwrap();
+                            let fd = crate::external_texture::steal_fd_via_pidfd(
+                                &game_fd,
+                                meta.image_fd,
+                            )
+                            .unwrap();
+                            let texture = unsafe {
+                                crate::external_texture::import_texture(
+                                    device.wgpu_device(),
+                                    fd,
+                                    &meta,
+                                )
+                                .unwrap()
+                            };
+                            let image = images.add(Image::new_fill(
                                 Extent3d {
-                                    width,
-                                    height: window.physical_height(),
+                                    width: meta.wgpu_size.width,
+                                    height: meta.wgpu_size.height,
                                     depth_or_array_layers: 1,
                                 },
                                 TextureDimension::D2,
-                                items,
+                                &[0, 0, 0, 255],
                                 TextureFormat::Rgba8UnormSrgb,
                                 RenderAssetUsages::RENDER_WORLD,
                             ));
-                            if !game.initialized {
-                                commands.spawn(Sprite {
-                                    image: image,
-                                    // custom_size: vec2(500.0, 500.0).into(),
-                                    ..Default::default()
-                                });
-                                game.initialized = true;
-                            } else {
-                                let mut sprite = sprites.single_mut().unwrap();
-                                images.remove(&sprite.image);
-                                sprite.image = image;
-                            }
+                            imagess.0.insert(image.clone(), texture);
+
+                            commands.spawn(Sprite {
+                                image: image,
+                                ..Default::default()
+                            });
+                            // if !game.initialized {
+                            //     game.initialized = true;
+                            // } else {
+                            //     let mut sprite = sprites.single_mut().unwrap();
+                            //     images.remove(&sprite.image);
+                            //     sprite.image = image;
+                            // }
                         }
                         _ => (),
                     }
@@ -367,5 +440,5 @@ pub enum EditorMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameMsg {
     Sender(IpcSender<EditorMsg>),
-    Image(Vec<u8>),
+    Image(crate::external_texture::TextureMetadata),
 }
