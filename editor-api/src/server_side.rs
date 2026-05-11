@@ -95,13 +95,13 @@ pub struct EditorBtn {}
 #[reflect(Component)]
 pub struct SceneEntity {}
 
+// TODO: all inner events should be passed and forwarded automatically
 fn process_window_event(
     In(mut event): In<WindowEvent>,
-    mut message_writer: MessageWriter<WindowEvent>,
+    mut commands: Commands,
     window: Single<(Entity, &mut Window), With<PrimaryWindow>>,
 ) {
     let (window_e, mut window) = window.into_inner();
-    info!("{event:?}");
 
     match &mut event {
         WindowEvent::AppLifecycle(..) => (),
@@ -153,11 +153,14 @@ fn process_window_event(
         WindowEvent::DoubleTapGesture(..) => (),
         WindowEvent::PanGesture(..) => (),
         WindowEvent::TouchInput(touch_input) => touch_input.window = window_e,
-        WindowEvent::KeyboardInput(keyboard_input) => keyboard_input.window = window_e,
+        WindowEvent::KeyboardInput(keyboard_input) => {
+            keyboard_input.window = window_e;
+            commands.write_message(keyboard_input.clone());
+        }
         WindowEvent::KeyboardFocusLost(..) => (),
     };
 
-    message_writer.write(event);
+    commands.write_message(event);
 }
 
 fn runner(mut app: App) -> AppExit {
