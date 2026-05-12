@@ -16,8 +16,8 @@ fn main() {
             DefaultPlugins,
             EditorIntegrationPlugin::default(),
             FeathersPlugins,
-            FrameTimeDiagnosticsPlugin::default(),
-            FpsOverlayPlugin::default(),
+            // FrameTimeDiagnosticsPlugin::default(),
+            // FpsOverlayPlugin::default(),
             FreeCameraPlugin,
             utils::plugin,
             feathers::plugin,
@@ -39,11 +39,15 @@ fn hello_world_system(mut commands: Commands) {
         },
     ));
     commands.spawn((Camera2d::default(), IsDefaultUiCamera));
-    commands.spawn(Sprite {
-        color: Color::BLACK,
-        custom_size: vec2(50.0, 50.0).into(),
-        ..Default::default()
-    });
+    commands.spawn((
+        Sprite {
+            color: Color::BLACK,
+            custom_size: vec2(50.0, 50.0).into(),
+
+            ..Default::default()
+        },
+        Transform::from_translation(vec3(100.0, 50.0, 0.0)),
+    ));
 }
 
 fn circle(mut gizmos: Gizmos, cursor_pos: Res<utils::CursorPos>) {

@@ -16,6 +16,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
 use bevy::render::texture::{GpuImage, ManualTextureView};
+use bevy::render::view::screenshot::Screenshot;
 use bevy::render::{Extract, Render, RenderApp, RenderPlugin, RenderSystems};
 use bevy::window::{PrimaryWindow, WindowEvent};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
@@ -26,7 +27,7 @@ use bevy::{
     render::render_resource::{BufferDescriptor, BufferUsages, MapMode, TexelCopyBufferInfo},
 };
 
-use crate::{EDITOR_SERVER_NAME_VAR, EditorMsg, GameMsg};
+use crate::{EDITOR_SERVER_NAME_VAR, EditorMsg, ExternalTexture, GameMsg};
 
 #[derive(Default)]
 pub struct EditorIntegrationPlugin;
@@ -36,7 +37,7 @@ impl Plugin for EditorIntegrationPlugin {
         app.init_resource::<EditorProcess>()
             .init_resource::<RenderTargets>()
             .add_systems(First, targets_first)
-            .add_systems(Last, targets_last)
+            .add_systems(Last, (populate_window_retargets, targets_last).chain())
             .set_runner(runner);
     }
 
@@ -46,8 +47,11 @@ impl Plugin for EditorIntegrationPlugin {
         // .insert_resource(RenderWorldSender(sender));
     }
 
-    fn cleanup(&self, _app: &mut App) {
-        // TODO: modify schedules to stop user code from execution
+    fn cleanup(&self, app: &mut App) {
+        let mut schedules = app.world_mut().resource_mut::<Schedules>();
+        for (label, schedule) in schedules.iter_mut() {
+            // TODO: modify schedules to stop user code from execution
+        }
     }
 }
 
@@ -142,7 +146,13 @@ fn process_window_event(
         WindowEvent::WindowFocused(window_focused) => window_focused.window = window_e,
         WindowEvent::WindowMoved(window_moved) => window_moved.window = window_e,
         WindowEvent::WindowOccluded(window_occluded) => window_occluded.window = window_e,
-        WindowEvent::WindowResized(window_resized) => window_resized.window = window_e,
+        WindowEvent::WindowResized(window_resized) => {
+            window_resized.window = window_e;
+            window
+                .resolution
+                .set_physical_resolution(window_resized.width as u32, window_resized.height as u32);
+            commands.write_message(window_resized.clone());
+        }
         WindowEvent::WindowScaleFactorChanged(window_scale_factor_changed) => {
             window_scale_factor_changed.window = window_e
         }
@@ -175,6 +185,48 @@ fn runner(mut app: App) -> AppExit {
     app.finish();
     app.cleanup();
 
+    // let mut editor_app = App::new();
+    // editor_app.add_plugins(
+    //     DefaultPlugins
+    //         .build()
+    //         .disable::<bevy::winit::WinitPlugin>()
+    //         .disable::<bevy::log::LogPlugin>(),
+    // );
+    // editor_app.finish();
+    // editor_app.cleanup();
+    // let img =
+    //     editor_app
+    //         .world_mut()
+    //         .resource_mut::<Assets<Image>>()
+    //         .add(Image::new_target_texture(
+    //             500,
+    //             500,
+    //             TextureFormat::Rgba8UnormSrgb,
+    //             None,
+    //         ));
+    // editor_app
+    //     .world_mut()
+    //     .spawn(((Camera2d, RenderTarget::Image(img.clone().into())),));
+    // editor_app.world_mut().spawn(((Sprite {
+    //     custom_size: vec2(50.0, 50.0).into(),
+    //     color: Color::WHITE,
+    //     ..Default::default()
+    // }),));
+
+    // editor_app.add_systems(Update, {
+    //     let img = img.clone();
+    //     move |mut commands: Commands, time: Res<Time>, mut timer: Local<Option<Timer>>| {
+    //         let timer = timer.get_or_insert_with(|| Timer::from_seconds(2.0, TimerMode::Repeating));
+    //         timer.tick(time.delta());
+    //         if timer.just_finished() {
+    //             commands
+    //                 .spawn(Screenshot::image(img.clone()))
+    //                 .observe(bevy::render::view::screenshot::save_to_disk("test.png"));
+    //         }
+    //     }
+    // });
+    // let mut editor_app = core::mem::take(editor_app.sub_apps_mut());
+
     let mut paused = false;
     let mut exit = false;
     loop {
@@ -193,6 +245,7 @@ fn runner(mut app: App) -> AppExit {
                     }
                 }
             });
+        // editor_app.update();
         if !paused {
             app.update();
         }
@@ -205,19 +258,92 @@ fn runner(mut app: App) -> AppExit {
     AppExit::Success
 }
 
+struct WindowsTargets {
+    render_target: RenderTarget,
+    external_texture: ExternalTexture,
+    last_size: UVec2,
+}
+
 #[derive(Resource, Default)]
 pub struct RenderTargets {
-    windows: EntityHashMap<RenderTarget>,
+    windows: EntityHashMap<WindowsTargets>,
     cameras: EntityHashMap<RenderTarget>,
+}
+
+fn populate_window_retargets(
+    mut manual_texture_views: ResMut<ManualTextureViews>,
+    mut targets: ResMut<RenderTargets>,
+    device: Res<RenderDevice>,
+    windows: Query<(Entity, &Window), Changed<Window>>,
+    sender: Res<EditorProcess>,
+) {
+    for (window_e, window) in windows {
+        if targets
+            .windows
+            .get(&window_e)
+            .is_some_and(|target| target.last_size == window.physical_size())
+        {
+            continue;
+        };
+        let external_texture = ExternalTexture::new(
+            device.wgpu_device(),
+            &wgpu::wgt::TextureDescriptor {
+                label: None,
+                size: Extent3d {
+                    width: window.physical_width(),
+                    height: window.physical_height(),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8UnormSrgb,
+                usage: TextureUsages::RENDER_ATTACHMENT
+                    | TextureUsages::COPY_SRC
+                    | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[TextureFormat::Rgba8UnormSrgb],
+            },
+            Some(window_e.entity().to_bits()),
+        )
+        .unwrap();
+        let view = external_texture
+            .texture()
+            .create_view(&wgpu::wgt::TextureViewDescriptor {
+                ..Default::default()
+            });
+        let texture_view =
+            ManualTextureView::with_default_format(view.into(), window.physical_size());
+        let texture_info = external_texture.info().clone();
+        if let Some(target) = targets.windows.get_mut(&window_e) {
+            let RenderTarget::TextureView(render_target) = &target.render_target else {
+                panic!("Not texture view?");
+            };
+            manual_texture_views.insert(render_target.clone(), texture_view);
+            target.external_texture = external_texture;
+            target.last_size = window.physical_size();
+        } else {
+            let id = loop {
+                let id = ManualTextureViewHandle(rand::random::<u32>());
+                if !manual_texture_views.contains_key(&id) {
+                    break id;
+                }
+            };
+            manual_texture_views.insert(id.clone(), texture_view);
+            let target = WindowsTargets {
+                render_target: RenderTarget::TextureView(id),
+                external_texture,
+                last_size: window.physical_size(),
+            };
+            targets.windows.insert(window_e, target);
+        }
+        sender.to_editor.send(GameMsg::Image(texture_info)).unwrap();
+    }
 }
 
 fn targets_last(
     mut cameras: Query<(Entity, &mut RenderTarget), With<Camera>>,
     mut targets: ResMut<RenderTargets>,
-    mut manual_texture_views: ResMut<ManualTextureViews>,
-    device: Res<RenderDevice>,
     primary_window: Query<Entity, With<PrimaryWindow>>,
-    sender: Res<EditorProcess>,
 ) {
     let primary_window = primary_window.single().ok();
     for (cam_e, mut render_target) in cameras.iter_mut() {
@@ -226,57 +352,11 @@ fn targets_last(
         {
             let targets = targets.as_mut();
             if !targets.cameras.contains_key(&cam_e) {
-                let replacement_render_target =
-                    targets.windows.entry(window_e.entity()).or_insert_with(|| {
-                        let id = loop {
-                            let id = ManualTextureViewHandle(rand::random::<u32>());
-                            if !manual_texture_views.contains_key(&id) {
-                                break id;
-                            }
-                        };
-                        let texture = unsafe {
-                            let texture = crate::external_texture::create_exportable_texture(
-                                device.wgpu_device(),
-                                &wgpu::wgt::TextureDescriptor {
-                                    label: None,
-                                    size: Extent3d {
-                                        width: 1280,
-                                        height: 700,
-                                        depth_or_array_layers: 1,
-                                    },
-                                    mip_level_count: 1,
-                                    sample_count: 1,
-                                    dimension: TextureDimension::D2,
-                                    format: TextureFormat::Rgba8UnormSrgb,
-                                    usage: TextureUsages::RENDER_ATTACHMENT
-                                        | TextureUsages::COPY_SRC
-                                        | TextureUsages::TEXTURE_BINDING,
-                                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
-                                },
-                            )
-                            .unwrap();
-                            let (fd, meta) = crate::external_texture::export_texture(
-                                device.wgpu_device(),
-                                &texture,
-                            )
-                            .unwrap();
-                            core::mem::forget(fd);
-                            sender.to_editor.send(GameMsg::Image(meta)).unwrap();
-                            texture
-                        };
-                        let view = texture.create_view(&wgpu::wgt::TextureViewDescriptor {
-                            ..Default::default()
-                        });
-                        core::mem::forget(texture);
-
-                        let texture_view =
-                            ManualTextureView::with_default_format(view.into(), uvec2(1280, 700));
-                        manual_texture_views.insert(id.clone(), texture_view);
-                        RenderTarget::TextureView(id)
-                    });
-                targets
-                    .cameras
-                    .insert(cam_e, replacement_render_target.clone());
+                if let Some(replacement_render_target) = targets.windows.get(&window_e.entity()) {
+                    targets
+                        .cameras
+                        .insert(cam_e, replacement_render_target.render_target.clone());
+                }
             }
             let replacement_render_target = targets.cameras.get_mut(&cam_e).unwrap();
             core::mem::swap(&mut *render_target, replacement_render_target);

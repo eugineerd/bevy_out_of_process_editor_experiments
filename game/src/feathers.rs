@@ -684,6 +684,17 @@ fn demo_column_2() -> impl Scene {
                     ),
                 ]
             ),
+            (
+                :FeathersButton {
+                    @caption: {bsn! { Text("crash me") ThemedText }},
+                }
+                Node {
+                    flex_grow: 1.0,
+                }
+                on(|_activate: On<Activate>| {
+                    panic!("OH NO!")
+                })
+            ),
         ]
     }
 }

@@ -13,15 +13,21 @@ fn main() -> AppExit {
             DefaultPlugins,
             OutOfProcessPlugin,
             FeathersPlugins,
-            // FrameTimeDiagnosticsPlugin::default(),
-            // FpsOverlayPlugin::default(),
+            FrameTimeDiagnosticsPlugin::default(),
+            FpsOverlayPlugin::default(),
         ))
         .add_systems(Startup, setup)
         .run()
 }
 
 fn setup(mut commands: Commands) {
-    commands.spawn_scene(bsn! {
-        Camera2d
+    commands.spawn_scene_list(bsn_list! {
+        Camera2d,
+        Node {
+            left: px(600),
+        }
+        Children [
+            Text::new("\"Editor\" stub")
+        ]
     });
 }

@@ -1,6 +1,7 @@
 use std::os::fd::{OwnedFd, RawFd};
 
 use bevy::image::ImageSampler;
+use bevy::log::LogPlugin;
 use bevy::platform::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
@@ -318,38 +319,27 @@ fn sync_world(world: &mut World) {
                   mut msgs: MessageReader<WindowEvent>,
                   mut images: ResMut<Assets<Image>>,
                   mut sprites: Query<&mut Sprite>,
-                  //   window: Single<&Window, With<PrimaryWindow>>,
                   mut imagess: ResMut<ImagesS>,
                   mut msg_queue: Local<Vec<GameMsg>>,
                   device: Res<RenderDevice>,
                   keys: Res<ButtonInput<KeyCode>>| {
-                game.to_game.send(EditorMsg::NextFrame).unwrap();
+                let status = game.proc.try_wait().unwrap();
+                if status.is_some() {
+                    return;
+                }
+                game.to_game.send(EditorMsg::NextFrame);
                 let game = &mut *game;
                 core::mem::swap(&mut *game.msg_queue.lock().unwrap(), &mut msg_queue);
                 for msg in msg_queue.drain(..) {
                     match msg {
-                        GameMsg::Image(meta) => {
-                            info!("Got image: {meta:?}");
-                            let game_pid = Pid::from_child(&game.proc);
-                            let game_fd =
-                                rustix::process::pidfd_open(game_pid, PidfdFlags::empty()).unwrap();
-                            let fd = crate::external_texture::steal_fd_via_pidfd(
-                                &game_fd,
-                                meta.image_fd,
-                            )
-                            .unwrap();
-                            let texture = unsafe {
-                                crate::external_texture::import_texture(
-                                    device.wgpu_device(),
-                                    fd,
-                                    &meta,
-                                )
-                                .unwrap()
-                            };
+                        GameMsg::Image(info) => {
+                            info!("Got image: {info:?}");
+                            let texture =
+                                ExternalTexture::import(device.wgpu_device(), &info).unwrap();
                             let image = images.add(Image::new_fill(
                                 Extent3d {
-                                    width: meta.wgpu_size.width,
-                                    height: meta.wgpu_size.height,
+                                    width: info.inner.wgpu_size.width,
+                                    height: info.inner.wgpu_size.height,
                                     depth_or_array_layers: 1,
                                 },
                                 TextureDimension::D2,
@@ -359,10 +349,14 @@ fn sync_world(world: &mut World) {
                             ));
                             imagess.0.insert(image.clone(), texture);
 
-                            commands.spawn(Sprite {
-                                image: image,
-                                ..Default::default()
-                            });
+                            if let Some(mut sprite) = sprites.iter_mut().next() {
+                                sprite.image = image;
+                            } else {
+                                commands.spawn(Sprite {
+                                    image: image,
+                                    ..Default::default()
+                                });
+                            }
                             // if !game.initialized {
                             //     game.initialized = true;
                             // } else {
@@ -375,9 +369,7 @@ fn sync_world(world: &mut World) {
                     }
                 }
                 for msg in msgs.read() {
-                    game.to_game
-                        .send(EditorMsg::WindowEvent(msg.clone()))
-                        .unwrap();
+                    game.to_game.send(EditorMsg::WindowEvent(msg.clone()));
                 }
                 if keys.just_pressed(KeyCode::KeyP) {
                     game.to_game.send(EditorMsg::Pause).unwrap();
@@ -441,5 +433,56 @@ pub enum EditorMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameMsg {
     Sender(IpcSender<EditorMsg>),
-    Image(crate::external_texture::TextureMetadata),
+    Image(ExternalTextureInfo),
+}
+
+pub struct ExternalTexture {
+    texture: wgpu::Texture,
+    info: ExternalTextureInfo,
+    _handle: OwnedFd,
+}
+
+impl ExternalTexture {
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub fn info(&self) -> &ExternalTextureInfo {
+        &self.info
+    }
+
+    pub fn new(
+        device: &wgpu::Device,
+        desc: &wgpu::TextureDescriptor,
+        id: Option<u64>,
+    ) -> Result<Self> {
+        let owner_pid = std::process::id();
+        unsafe {
+            let texture = external_texture::create_exportable_texture(device, desc).unwrap();
+            let (fd, meta) = external_texture::export_texture(device, &texture).unwrap();
+            Ok(ExternalTexture {
+                texture,
+                info: ExternalTextureInfo {
+                    inner: meta,
+                    texture_id: id,
+                    owner_pid,
+                },
+                _handle: fd,
+            })
+        }
+    }
+
+    pub fn import(device: &wgpu::Device, info: &ExternalTextureInfo) -> Result<wgpu::Texture> {
+        let owner_pid = Pid::from_raw(info.owner_pid as i32).unwrap();
+        let pidfd = rustix::process::pidfd_open(owner_pid, PidfdFlags::empty()).unwrap();
+        let image_fd = external_texture::steal_fd_via_pidfd(&pidfd, info.inner.image_fd).unwrap();
+        unsafe { Ok(external_texture::import_texture(device, image_fd, &info.inner).unwrap()) }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ExternalTextureInfo {
+    owner_pid: u32,
+    texture_id: Option<u64>,
+    inner: external_texture::TextureMetadata,
 }
