@@ -1,5 +1,6 @@
 use std::os::fd::{OwnedFd, RawFd};
 
+use bevy::camera::NormalizedRenderTarget;
 use bevy::image::ImageSampler;
 use bevy::log::LogPlugin;
 use bevy::platform::sync::Arc;
@@ -42,7 +43,7 @@ pub struct OutOfProcessPlugin;
 impl Plugin for OutOfProcessPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(start_game_process_observer)
-            .init_resource::<ImagesS>()
+            .init_resource::<ViewportTargets>()
             .add_systems(
                 Update,
                 (|mut commands: Commands| {
@@ -51,6 +52,7 @@ impl Plugin for OutOfProcessPlugin {
                 .run_if(common_conditions::input_just_pressed(KeyCode::KeyU)),
             )
             .add_observer(ModifySystem::observer)
+            .add_observer(ViewportTextureUpdate::observer)
             .add_systems(PreUpdate, sync_world);
     }
 
@@ -58,14 +60,15 @@ impl Plugin for OutOfProcessPlugin {
         app.sub_app_mut(RenderApp)
             .add_systems(
                 ExtractSchedule,
-                |imagess: Extract<Res<ImagesS>>, mut commands: Commands| {
-                    commands.insert_resource(imagess.clone());
+                |targets: Extract<Res<ViewportTargets>>, mut commands: Commands| {
+                    commands.insert_resource(targets.clone());
                 },
             )
             .add_systems(
                 Render,
-                (|imagess: Res<ImagesS>, mut gpu_images: ResMut<RenderAssets<GpuImage>>| {
-                    for (k, v) in imagess.0.iter() {
+                (|targets: Res<ViewportTargets>,
+                  mut gpu_images: ResMut<RenderAssets<GpuImage>>| {
+                    for (k, v) in targets.values() {
                         if let Some(image) = gpu_images.get_mut(k) {
                             let texture: bevy::render::render_resource::Texture = v.clone().into();
                             let texture_view =
@@ -326,8 +329,8 @@ fn spawn_editor_sync(world: &mut World, game: &mut GameProcess) {
     game.reverse_entities_map = game.entities_map.iter().map(|(k, v)| (*v, *k)).collect();
 }
 
-#[derive(Default, Resource, ExtractResource, Clone)]
-struct ImagesS(HashMap<Handle<Image>, wgpu::Texture>);
+#[derive(Default, Resource, ExtractResource, Clone, DerefMut, Deref)]
+pub struct ViewportTargets(HashMap<u64, (Handle<Image>, wgpu::Texture)>);
 
 fn sync_world(world: &mut World) {
     if !world.contains_resource::<GameProcess>() {
@@ -337,12 +340,7 @@ fn sync_world(world: &mut World) {
         .run_system_cached(
             move |mut commands: Commands,
                   mut game: ResMut<GameProcess>,
-                  mut msgs: MessageReader<WindowEvent>,
-                  mut images: ResMut<Assets<Image>>,
-                  mut sprites: Query<&mut Sprite>,
-                  mut imagess: ResMut<ImagesS>,
                   mut msg_queue: Local<Vec<GameMsg>>,
-                  device: Res<RenderDevice>,
                   keys: Res<ButtonInput<KeyCode>>| {
                 let status = game.proc.try_wait().unwrap();
                 if status.is_some() {
@@ -354,42 +352,7 @@ fn sync_world(world: &mut World) {
                     match msg {
                         GameMsg::Image(info) => {
                             info!("Got image: {info:?}");
-                            let texture = match ExternalTexture::import(device.wgpu_device(), &info)
-                            {
-                                Ok(texture) => texture,
-                                Err(err) => {
-                                    error!("{err}");
-                                    continue;
-                                }
-                            };
-                            let image = images.add(Image::new_fill(
-                                Extent3d {
-                                    width: info.inner.wgpu_size.width,
-                                    height: info.inner.wgpu_size.height,
-                                    depth_or_array_layers: 1,
-                                },
-                                TextureDimension::D2,
-                                &[0, 0, 0, 255],
-                                TextureFormat::Rgba8UnormSrgb,
-                                RenderAssetUsages::RENDER_WORLD,
-                            ));
-                            imagess.0.insert(image.clone(), texture);
-
-                            if let Some(mut sprite) = sprites.iter_mut().next() {
-                                sprite.image = image;
-                            } else {
-                                commands.spawn(Sprite {
-                                    image: image,
-                                    ..Default::default()
-                                });
-                            }
-                            // if !game.initialized {
-                            //     game.initialized = true;
-                            // } else {
-                            //     let mut sprite = sprites.single_mut().unwrap();
-                            //     images.remove(&sprite.image);
-                            //     sprite.image = image;
-                            // }
+                            commands.trigger(ViewportTextureUpdate { info });
                         }
                         GameMsg::ProcessInfo { systems } => {
                             game.systems = systems
@@ -400,9 +363,6 @@ fn sync_world(world: &mut World) {
                         }
                         _ => (),
                     }
-                }
-                for msg in msgs.read() {
-                    game.send(EditorMsg::WindowEvent(msg.clone()));
                 }
                 if keys.just_pressed(KeyCode::KeyP) {
                     game.send(EditorMsg::Pause);
@@ -417,6 +377,58 @@ fn sync_world(world: &mut World) {
 
 #[derive(Event)]
 pub struct GotSystems;
+
+#[derive(Event)]
+pub struct ViewportTextureUpdate {
+    pub info: ExternalTextureInfo,
+}
+
+#[derive(Event)]
+pub struct ViewportTextureCreated {
+    pub id: u64,
+}
+
+impl ViewportTextureUpdate {
+    pub fn observer(
+        on: On<Self>,
+        mut images: ResMut<Assets<Image>>,
+        mut targets: ResMut<ViewportTargets>,
+        device: Res<RenderDevice>,
+        mut commands: Commands,
+    ) {
+        let Some(id) = on.info.texture_id else {
+            error!("External texture must have an id");
+            return;
+        };
+        let texture = match ExternalTexture::import(device.wgpu_device(), &on.info) {
+            Ok(texture) => texture,
+            Err(err) => {
+                error!("{err}");
+                return;
+            }
+        };
+        if let Some((handle, existing_texture)) = targets.get_mut(&id)
+            && let Some(mut existing_image) = images.get_mut(handle)
+        {
+            existing_image.resize(on.info.inner.wgpu_size);
+            *existing_texture = texture;
+        } else {
+            let image = images.add(Image::new_fill(
+                Extent3d {
+                    width: on.info.inner.wgpu_size.width,
+                    height: on.info.inner.wgpu_size.height,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                &[0, 0, 0, 255],
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::RENDER_WORLD,
+            ));
+            targets.insert(id, (image, texture));
+            commands.trigger(ViewportTextureCreated { id })
+        };
+    }
+}
 
 #[derive(Event)]
 pub struct ModifySystem {
@@ -550,6 +562,6 @@ impl ExternalTexture {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ExternalTextureInfo {
     owner_pid: u32,
-    texture_id: Option<u64>,
+    pub texture_id: Option<u64>,
     inner: external_texture::TextureMetadata,
 }

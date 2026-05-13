@@ -233,23 +233,18 @@ fn runner(mut app: App) -> AppExit {
     let mut schedules = app.world_mut().resource_mut::<Schedules>();
     for (l, s) in schedules.iter_mut() {
         dbg!(l);
-        if !l.dyn_eq(&Update) {
-            continue;
-        }
         let systems = &mut s.graph_mut().systems;
         let labels: Vec<_> = systems.iter().map(|(label, ..)| label).collect();
         for label in labels {
             let system_name = systems.get(label).unwrap().name();
             let conditions = systems.get_conditions_mut(label).unwrap();
-            if system_name.starts_with("game") {
-                let should_run = Arc::new(AtomicBool::new(true));
-                disabled_systems
-                    .0
-                    .insert(system_name.as_string(), should_run.clone());
-                conditions.push(bevy::ecs::schedule::ConditionWithAccess::new(Box::new(
-                    IntoSystem::into_system(move || should_run.load(Ordering::Relaxed)),
-                )));
-            }
+            let should_run = Arc::new(AtomicBool::new(true));
+            disabled_systems
+                .0
+                .insert(system_name.as_string(), should_run.clone());
+            conditions.push(bevy::ecs::schedule::ConditionWithAccess::new(Box::new(
+                IntoSystem::into_system(move || should_run.load(Ordering::Relaxed)),
+            )));
         }
     }
 
