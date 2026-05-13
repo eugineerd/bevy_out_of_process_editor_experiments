@@ -33,6 +33,7 @@ mod external_texture;
 mod ipc;
 mod server_side;
 pub use server_side::*;
+use thiserror::Error;
 use wgpu::TextureViewDescriptor;
 
 #[derive(Default)]
@@ -353,8 +354,14 @@ fn sync_world(world: &mut World) {
                     match msg {
                         GameMsg::Image(info) => {
                             info!("Got image: {info:?}");
-                            let texture =
-                                ExternalTexture::import(device.wgpu_device(), &info).unwrap();
+                            let texture = match ExternalTexture::import(device.wgpu_device(), &info)
+                            {
+                                Ok(texture) => texture,
+                                Err(err) => {
+                                    error!("{err}");
+                                    continue;
+                                }
+                            };
                             let image = images.add(Image::new_fill(
                                 Extent3d {
                                     width: info.inner.wgpu_size.width,
@@ -482,6 +489,16 @@ pub enum GameMsg {
     ProcessInfo { systems: Vec<String> },
 }
 
+#[derive(Error, Debug)]
+pub enum ExternalTextureImportError {
+    #[error("Io error: {0}")]
+    IoError(#[from] rustix::io::Errno),
+    #[error("Invalid pid value in external texture info")]
+    InvalidPid,
+    #[error("Texture share error: {0}")]
+    TextureShareError(#[from] external_texture::TextureShareError),
+}
+
 pub struct ExternalTexture {
     texture: wgpu::Texture,
     info: ExternalTextureInfo,
@@ -518,11 +535,15 @@ impl ExternalTexture {
         }
     }
 
-    pub fn import(device: &wgpu::Device, info: &ExternalTextureInfo) -> Result<wgpu::Texture> {
-        let owner_pid = Pid::from_raw(info.owner_pid as i32).unwrap();
-        let pidfd = rustix::process::pidfd_open(owner_pid, PidfdFlags::empty()).unwrap();
-        let image_fd = external_texture::steal_fd_via_pidfd(&pidfd, info.inner.image_fd).unwrap();
-        unsafe { Ok(external_texture::import_texture(device, image_fd, &info.inner).unwrap()) }
+    pub fn import(
+        device: &wgpu::Device,
+        info: &ExternalTextureInfo,
+    ) -> Result<wgpu::Texture, ExternalTextureImportError> {
+        let owner_pid =
+            Pid::from_raw(info.owner_pid as i32).ok_or(ExternalTextureImportError::InvalidPid)?;
+        let pidfd = rustix::process::pidfd_open(owner_pid, PidfdFlags::empty())?;
+        let image_fd = external_texture::steal_fd_via_pidfd(&pidfd, info.inner.image_fd)?;
+        Ok(unsafe { external_texture::import_texture(device, image_fd, &info.inner)? })
     }
 }
 
