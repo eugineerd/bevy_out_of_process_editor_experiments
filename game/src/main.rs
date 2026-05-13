@@ -13,7 +13,7 @@ mod utils;
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.build().disable::<bevy::audio::AudioPlugin>(),
             EditorIntegrationPlugin::default(),
             FeathersPlugins,
             // FrameTimeDiagnosticsPlugin::default(),

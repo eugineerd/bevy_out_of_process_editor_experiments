@@ -49,6 +49,7 @@ impl Plugin for OutOfProcessPlugin {
                 })
                 .run_if(common_conditions::input_just_pressed(KeyCode::KeyU)),
             )
+            .add_observer(ModifySystem::observer)
             .add_systems(PreUpdate, sync_world);
     }
 
@@ -123,6 +124,7 @@ fn start_game_process_observer(
         to_game: sender,
         // from_game: Mutex::new(reciver),
         msg_queue,
+        systems: Default::default(),
     };
     if let Some(mut game) = game {
         game.proc.kill().unwrap();
@@ -130,6 +132,10 @@ fn start_game_process_observer(
     } else {
         commands.insert_resource(game_proc);
     }
+}
+
+pub struct RemoteSystem {
+    pub is_running: bool,
 }
 
 #[derive(Resource)]
@@ -141,6 +147,20 @@ pub struct GameProcess {
     to_game: IpcSender<EditorMsg>,
     // from_game: Mutex<IpcReceiver<GameMsg>>,
     msg_queue: Arc<Mutex<Vec<GameMsg>>>,
+    pub systems: HashMap<String, RemoteSystem>,
+}
+
+impl GameProcess {
+    pub fn send(&self, msg: EditorMsg) {
+        if let Err(e) = self.to_game.send(msg) {
+            error!("Sending faild: {e}");
+        }
+    }
+
+    pub fn get_messages(&self, swap_to: &mut Vec<GameMsg>) {
+        swap_to.clear();
+        core::mem::swap(&mut *self.msg_queue.lock().unwrap(), swap_to);
+    }
 }
 
 /// A response according to BRP.
@@ -327,9 +347,8 @@ fn sync_world(world: &mut World) {
                 if status.is_some() {
                     return;
                 }
-                game.to_game.send(EditorMsg::NextFrame);
-                let game = &mut *game;
-                core::mem::swap(&mut *game.msg_queue.lock().unwrap(), &mut msg_queue);
+                game.send(EditorMsg::NextFrame);
+                game.get_messages(&mut msg_queue);
                 for msg in msg_queue.drain(..) {
                     match msg {
                         GameMsg::Image(info) => {
@@ -365,21 +384,46 @@ fn sync_world(world: &mut World) {
                             //     sprite.image = image;
                             // }
                         }
+                        GameMsg::ProcessInfo { systems } => {
+                            game.systems = systems
+                                .into_iter()
+                                .map(|n| (n, RemoteSystem { is_running: false }))
+                                .collect();
+                            commands.trigger(GotSystems);
+                        }
                         _ => (),
                     }
                 }
                 for msg in msgs.read() {
-                    game.to_game.send(EditorMsg::WindowEvent(msg.clone()));
+                    game.send(EditorMsg::WindowEvent(msg.clone()));
                 }
                 if keys.just_pressed(KeyCode::KeyP) {
-                    game.to_game.send(EditorMsg::Pause).unwrap();
+                    game.send(EditorMsg::Pause);
                 }
                 if keys.just_pressed(KeyCode::KeyO) {
-                    game.to_game.send(EditorMsg::Continue).unwrap();
+                    game.send(EditorMsg::Continue);
                 }
             },
         )
         .unwrap();
+}
+
+#[derive(Event)]
+pub struct GotSystems;
+
+#[derive(Event)]
+pub struct ModifySystem {
+    pub name: String,
+    pub state: bool,
+}
+
+impl ModifySystem {
+    pub fn observer(on: On<Self>, game: Res<GameProcess>) {
+        game.send(EditorMsg::ModifySystem {
+            name: on.name.clone(),
+            state: on.state,
+        })
+    }
 }
 
 /*
@@ -425,6 +469,7 @@ pub const EDITOR_SERVER_NAME_VAR: &'static str = "BEVY_EDITOR_SERVER_NAME";
 pub enum EditorMsg {
     NextFrame,
     WindowEvent(WindowEvent),
+    ModifySystem { name: String, state: bool },
     Exit,
     Pause,
     Continue,
@@ -434,6 +479,7 @@ pub enum EditorMsg {
 pub enum GameMsg {
     Sender(IpcSender<EditorMsg>),
     Image(ExternalTextureInfo),
+    ProcessInfo { systems: Vec<String> },
 }
 
 pub struct ExternalTexture {

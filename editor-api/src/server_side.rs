@@ -1,12 +1,17 @@
 use std::time::Duration;
 
+use bevy::app::MainSchedulePlugin;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{
     ImageRenderTarget, ManualTextureViewHandle, NormalizedRenderTarget, RenderTarget,
 };
 use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
+use bevy::ecs::schedule::ScheduleLabel;
+use bevy::platform::collections::HashMap;
 use bevy::platform::sync::Arc;
 use bevy::platform::sync::Mutex;
+use bevy::platform::sync::atomic::AtomicBool;
+use bevy::platform::sync::atomic::Ordering;
 use bevy::prelude::*;
 use bevy::render::camera::{ExtractedCamera, extract_cameras};
 use bevy::render::render_asset::{RenderAsset, RenderAssets};
@@ -45,13 +50,6 @@ impl Plugin for EditorIntegrationPlugin {
         // let sender = app.world().resource::<EditorProcess>().to_editor.clone();
         app.sub_app_mut(RenderApp);
         // .insert_resource(RenderWorldSender(sender));
-    }
-
-    fn cleanup(&self, app: &mut App) {
-        let mut schedules = app.world_mut().resource_mut::<Schedules>();
-        for (label, schedule) in schedules.iter_mut() {
-            // TODO: modify schedules to stop user code from execution
-        }
     }
 }
 
@@ -181,6 +179,9 @@ fn process_window_event(
     commands.write_message(event);
 }
 
+#[derive(Resource, Default)]
+pub struct DisabledSystems(HashMap<String, Arc<AtomicBool>>);
+
 fn runner(mut app: App) -> AppExit {
     app.finish();
     app.cleanup();
@@ -227,8 +228,39 @@ fn runner(mut app: App) -> AppExit {
     // });
     // let mut editor_app = core::mem::take(editor_app.sub_apps_mut());
 
+    // let mut disabled_systems = HashMap::new();
+    let mut disabled_systems = DisabledSystems::default();
+    let mut schedules = app.world_mut().resource_mut::<Schedules>();
+    for (l, s) in schedules.iter_mut() {
+        dbg!(l);
+        if !l.dyn_eq(&Update) {
+            continue;
+        }
+        let systems = &mut s.graph_mut().systems;
+        let labels: Vec<_> = systems.iter().map(|(label, ..)| label).collect();
+        for label in labels {
+            let system_name = systems.get(label).unwrap().name();
+            let conditions = systems.get_conditions_mut(label).unwrap();
+            if system_name.starts_with("game") {
+                let should_run = Arc::new(AtomicBool::new(true));
+                disabled_systems
+                    .0
+                    .insert(system_name.as_string(), should_run.clone());
+                conditions.push(bevy::ecs::schedule::ConditionWithAccess::new(Box::new(
+                    IntoSystem::into_system(move || should_run.load(Ordering::Relaxed)),
+                )));
+            }
+        }
+    }
+
     let mut paused = false;
     let mut exit = false;
+    app.world_mut()
+        .resource_mut::<EditorProcess>()
+        .to_editor
+        .send(GameMsg::ProcessInfo {
+            systems: disabled_systems.0.keys().cloned().collect(),
+        });
     loop {
         app.world_mut()
             .resource_scope(|world, editor: Mut<EditorProcess>| {
@@ -240,7 +272,14 @@ fn runner(mut app: App) -> AppExit {
                             .run_system_cached_with(process_window_event, window_event)
                             .unwrap(),
                         EditorMsg::Pause => paused = true,
-                        EditorMsg::Continue => paused = false,
+                        EditorMsg::Continue => {
+                            paused = false;
+                        }
+                        EditorMsg::ModifySystem { name, state } => {
+                            if let Some(inner) = disabled_systems.0.get(&name) {
+                                inner.store(state, Ordering::SeqCst)
+                            }
+                        }
                         EditorMsg::Exit => exit = true,
                     }
                 }
