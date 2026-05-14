@@ -1,6 +1,7 @@
+use core::mem;
 use std::time::Duration;
 
-use bevy::app::MainSchedulePlugin;
+use bevy::app::{AppLabel, MainSchedulePlugin};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{
     ImageRenderTarget, ManualTextureViewHandle, NormalizedRenderTarget, RenderTarget,
@@ -22,7 +23,8 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
 use bevy::render::texture::{GpuImage, ManualTextureView};
 use bevy::render::view::screenshot::Screenshot;
-use bevy::render::{Extract, Render, RenderApp, RenderPlugin, RenderSystems};
+use bevy::render::{Extract, MainWorld, Render, RenderApp, RenderPlugin, RenderSystems};
+use bevy::tasks::ComputeTaskPool;
 use bevy::window::{PrimaryWindow, WindowEvent};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use serde::{Deserialize, Serialize};
@@ -39,32 +41,71 @@ pub struct EditorIntegrationPlugin;
 
 impl Plugin for EditorIntegrationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<EditorProcess>()
-            .init_resource::<RenderTargets>()
-            .add_systems(First, targets_first)
-            .add_systems(Last, (populate_window_retargets, targets_last).chain())
-            .set_runner(runner);
-    }
+        let Ok(server_name) = std::env::var(EDITOR_SERVER_NAME_VAR) else {
+            return;
+        };
+        info!("Launching with editor integration");
 
-    fn finish(&self, app: &mut App) {
-        // let sender = app.world().resource::<EditorProcess>().to_editor.clone();
-        app.sub_app_mut(RenderApp);
-        // .insert_resource(RenderWorldSender(sender));
+        app.init_resource::<RenderTargets>(); // TODO: move to editor subapp
+
+        let editor_process = EditorProcess::new(&server_name);
+        let mut sub_app = SubApp::new();
+        sub_app
+            .insert_resource(editor_process)
+            .init_resource::<RenderTargets>()
+            .init_resource::<RunnerState>()
+            .init_resource::<SimulationWorld>()
+            .init_resource::<DisabledSystems>()
+            .add_systems(IntegrationStartup, extract_systems)
+            .add_systems(
+                PreSimulation,
+                (
+                    react_to_editor_messages,
+                    move |mut sim_world: ResMut<SimulationWorld>| {
+                        sim_world.run_system_cached(targets_first).unwrap();
+                    },
+                )
+                    .chain(),
+            )
+            .add_systems(
+                PostSimulation,
+                (
+                    |editor_process: Res<EditorProcess>, mut sim_world: ResMut<SimulationWorld>| {
+                        sim_world
+                            .run_system_cached_with(
+                                populate_window_retargets,
+                                editor_process.to_editor.clone(),
+                            )
+                            .unwrap();
+                    },
+                    |mut sim_world: ResMut<SimulationWorld>| {
+                        sim_world.run_system_cached(targets_last).unwrap();
+                    },
+                )
+                    .chain(),
+            );
+
+        app.set_runner(runner)
+            .insert_sub_app(EditorIntegrationApp, sub_app);
     }
 }
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, AppLabel)]
+pub struct EditorIntegrationApp;
 
 #[derive(Resource)]
 pub struct EditorProcess {
     to_editor: IpcSender<GameMsg>,
-    // from_editor: Mutex<IpcReceiver<EditorMsg>>,
     msg_queue: Arc<Mutex<Vec<EditorMsg>>>,
 }
 
-impl Default for EditorProcess {
-    fn default() -> Self {
+#[derive(Resource, Default, Deref, DerefMut)]
+pub struct SimulationWorld(pub World);
+
+impl EditorProcess {
+    fn new(server_name: &str) -> Self {
         let (game_sender, reciever) = ipc::channel().unwrap();
-        let server_name = std::env::var(EDITOR_SERVER_NAME_VAR).unwrap();
-        let sender = IpcSender::connect(server_name).unwrap();
+        let sender = IpcSender::connect(server_name.to_string()).unwrap();
         sender.send(GameMsg::Sender(game_sender)).unwrap();
         let msg_queue = Arc::new(Mutex::new(Vec::new()));
         std::thread::spawn({
@@ -87,8 +128,19 @@ impl Default for EditorProcess {
         });
         Self {
             to_editor: sender,
-            msg_queue, // from_editor: Mutex::new(reciever),
+            msg_queue,
         }
+    }
+
+    pub fn send(&self, msg: GameMsg) {
+        if let Err(e) = self.to_editor.send(msg) {
+            error!("Sending failed: {e}");
+        }
+    }
+
+    pub fn get_messages(&self, swap_to: &mut Vec<EditorMsg>) {
+        swap_to.clear();
+        core::mem::swap(&mut *self.msg_queue.lock().unwrap(), swap_to);
     }
 }
 
@@ -105,132 +157,197 @@ pub struct EditorBtn {}
 #[reflect(Component)]
 pub struct SceneEntity {}
 
-// TODO: all inner events should be passed and forwarded automatically
-fn process_window_event(
-    In(mut event): In<WindowEvent>,
-    mut commands: Commands,
-    window: Single<(Entity, &mut Window), With<PrimaryWindow>>,
-) {
-    let (window_e, mut window) = window.into_inner();
-
-    match &mut event {
-        WindowEvent::AppLifecycle(..) => (),
-        WindowEvent::CursorEntered(cursor_entered) => cursor_entered.window = window_e,
-        WindowEvent::CursorLeft(cursor_left) => cursor_left.window = window_e,
-        WindowEvent::FileDragAndDrop(file_drag_and_drop) => {
-            match file_drag_and_drop {
-                FileDragAndDrop::DroppedFile { window, .. } => *window = window_e,
-                FileDragAndDrop::HoveredFile { window, .. } => *window = window_e,
-                FileDragAndDrop::HoveredFileCanceled { window } => *window = window_e,
-            };
+fn write_window_event(
+    event: WindowEvent,
+    world: &mut World,
+    windows: &mut QueryState<&mut Window>,
+) -> Result {
+    match event.clone() {
+        WindowEvent::AppLifecycle(e) => {
+            world.write_message(e);
         }
-        WindowEvent::Ime(ime) => {
-            match ime {
-                Ime::Preedit { window, .. } => *window = window_e,
-                Ime::Commit { window, .. } => *window = window_e,
-                Ime::Enabled { window } => *window = window_e,
-                Ime::Disabled { window } => *window = window_e,
-            };
+        WindowEvent::CursorEntered(e) => {
+            world.write_message(e);
         }
-        WindowEvent::RequestRedraw(..) => (),
-        WindowEvent::WindowBackendScaleFactorChanged(window_backend_scale_factor_changed) => {
-            window_backend_scale_factor_changed.window = window_e
+        WindowEvent::CursorLeft(e) => {
+            world.write_message(e);
         }
-        WindowEvent::WindowCloseRequested(window_close_requested) => {
-            window_close_requested.window = window_e
+        WindowEvent::CursorMoved(e) => {
+            let mut window = windows.get_mut(world, e.window)?;
+            window.set_physical_cursor_position(Some(e.position.into()));
+            world.write_message(e);
         }
-        WindowEvent::WindowCreated(window_created) => window_created.window = window_e,
-        WindowEvent::WindowDestroyed(window_destroyed) => window_destroyed.window = window_e,
-        WindowEvent::WindowFocused(window_focused) => window_focused.window = window_e,
-        WindowEvent::WindowMoved(window_moved) => window_moved.window = window_e,
-        WindowEvent::WindowOccluded(window_occluded) => window_occluded.window = window_e,
-        WindowEvent::WindowResized(window_resized) => {
-            window_resized.window = window_e;
+        WindowEvent::FileDragAndDrop(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::Ime(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::RequestRedraw(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowBackendScaleFactorChanged(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowCloseRequested(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowCreated(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowDestroyed(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowFocused(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowMoved(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowOccluded(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::WindowResized(e) => {
+            let mut window = windows.get_mut(world, e.window)?;
             window
                 .resolution
-                .set_physical_resolution(window_resized.width as u32, window_resized.height as u32);
-            commands.write_message(window_resized.clone());
+                .set_physical_resolution(e.width as u32, e.height as u32);
+            world.write_message(e);
         }
-        WindowEvent::WindowScaleFactorChanged(window_scale_factor_changed) => {
-            window_scale_factor_changed.window = window_e
+        WindowEvent::WindowScaleFactorChanged(e) => {
+            world.write_message(e);
         }
-        WindowEvent::WindowThemeChanged(window_theme_changed) => {
-            window_theme_changed.window = window_e
+        WindowEvent::WindowThemeChanged(e) => {
+            world.write_message(e);
         }
-        WindowEvent::CursorMoved(cursor_moved) => {
-            window.set_physical_cursor_position(Some(cursor_moved.position.into()));
-            cursor_moved.window = window_e;
+        WindowEvent::MouseButtonInput(e) => {
+            world.write_message(e);
         }
-        WindowEvent::MouseMotion(..) => (),
-        WindowEvent::MouseWheel(mouse_wheel) => mouse_wheel.window = window_e,
-        WindowEvent::MouseButtonInput(mouse_button_input) => mouse_button_input.window = window_e,
-        WindowEvent::PinchGesture(..) => (),
-        WindowEvent::RotationGesture(..) => (),
-        WindowEvent::DoubleTapGesture(..) => (),
-        WindowEvent::PanGesture(..) => (),
-        WindowEvent::TouchInput(touch_input) => touch_input.window = window_e,
-        WindowEvent::KeyboardInput(keyboard_input) => {
-            keyboard_input.window = window_e;
-            commands.write_message(keyboard_input.clone());
+        WindowEvent::MouseMotion(e) => {
+            world.write_message(e);
         }
-        WindowEvent::KeyboardFocusLost(..) => (),
-    };
+        WindowEvent::MouseWheel(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::PinchGesture(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::RotationGesture(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::DoubleTapGesture(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::PanGesture(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::TouchInput(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::KeyboardInput(e) => {
+            world.write_message(e);
+        }
+        WindowEvent::KeyboardFocusLost(e) => {
+            world.write_message(e);
+        }
+    }
 
-    commands.write_message(event);
+    world.write_message(event);
+
+    Ok(())
 }
 
 #[derive(Resource, Default)]
+struct RunnerState {
+    exit: bool,
+    paused: bool,
+}
+
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct PreSimulation;
+
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct PostSimulation;
+
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct IntegrationStartup;
+
+#[derive(Resource, Default)]
 pub struct DisabledSystems(HashMap<String, Arc<AtomicBool>>);
+
+fn run_schedule_with_simulation_world(
+    schedule: impl ScheduleLabel,
+    integration_world: &mut World,
+    simulation_world: &mut World,
+) {
+    mem::swap(
+        simulation_world,
+        integration_world.resource_mut::<SimulationWorld>().as_mut(),
+    );
+    integration_world.run_schedule(schedule);
+    mem::swap(
+        simulation_world,
+        integration_world.resource_mut::<SimulationWorld>().as_mut(),
+    );
+}
 
 fn runner(mut app: App) -> AppExit {
     app.finish();
     app.cleanup();
 
-    // let mut editor_app = App::new();
-    // editor_app.add_plugins(
-    //     DefaultPlugins
-    //         .build()
-    //         .disable::<bevy::winit::WinitPlugin>()
-    //         .disable::<bevy::log::LogPlugin>(),
-    // );
-    // editor_app.finish();
-    // editor_app.cleanup();
-    // let img =
-    //     editor_app
-    //         .world_mut()
-    //         .resource_mut::<Assets<Image>>()
-    //         .add(Image::new_target_texture(
-    //             500,
-    //             500,
-    //             TextureFormat::Rgba8UnormSrgb,
-    //             None,
-    //         ));
-    // editor_app
-    //     .world_mut()
-    //     .spawn(((Camera2d, RenderTarget::Image(img.clone().into())),));
-    // editor_app.world_mut().spawn(((Sprite {
-    //     custom_size: vec2(50.0, 50.0).into(),
-    //     color: Color::WHITE,
-    //     ..Default::default()
-    // }),));
+    let mut editor_integration_app = app.remove_sub_app(EditorIntegrationApp).unwrap();
+    let mut sub_apps = mem::take(app.sub_apps_mut());
+    let integration_world = editor_integration_app.world_mut();
 
-    // editor_app.add_systems(Update, {
-    //     let img = img.clone();
-    //     move |mut commands: Commands, time: Res<Time>, mut timer: Local<Option<Timer>>| {
-    //         let timer = timer.get_or_insert_with(|| Timer::from_seconds(2.0, TimerMode::Repeating));
-    //         timer.tick(time.delta());
-    //         if timer.just_finished() {
-    //             commands
-    //                 .spawn(Screenshot::image(img.clone()))
-    //                 .observe(bevy::render::view::screenshot::save_to_disk("test.png"));
-    //         }
-    //     }
-    // });
-    // let mut editor_app = core::mem::take(editor_app.sub_apps_mut());
+    run_schedule_with_simulation_world(
+        IntegrationStartup,
+        integration_world,
+        sub_apps.main.world_mut(),
+    );
+    loop {
+        // Pre simulation world update
+        run_schedule_with_simulation_world(
+            PreSimulation,
+            integration_world,
+            sub_apps.main.world_mut(),
+        );
+        if let Some(state) = integration_world.get_resource::<RunnerState>() {
+            if state.paused {
+                continue;
+            }
+            if state.exit {
+                break;
+            }
+        };
 
-    // let mut disabled_systems = HashMap::new();
-    let mut disabled_systems = DisabledSystems::default();
-    let mut schedules = app.world_mut().resource_mut::<Schedules>();
+        // Simulation world update
+        sub_apps.main.run_default_schedule();
+
+        // Post simulation world update
+        run_schedule_with_simulation_world(
+            PostSimulation,
+            integration_world,
+            sub_apps.main.world_mut(),
+        );
+        integration_world.clear_trackers();
+
+        // Subapps update
+        for (_, sub_app) in sub_apps.sub_apps.iter_mut() {
+            sub_app.extract(sub_apps.main.world_mut());
+            sub_app.update();
+        }
+        sub_apps.main.world_mut().clear_trackers();
+    }
+
+    AppExit::Success
+}
+
+fn extract_systems(
+    mut sim_world: ResMut<SimulationWorld>,
+    editor: Res<EditorProcess>,
+    mut disabled_systems: ResMut<DisabledSystems>,
+) {
+    let mut schedules = sim_world.resource_mut::<Schedules>();
     for (l, s) in schedules.iter_mut() {
         dbg!(l);
         let systems = &mut s.graph_mut().systems;
@@ -248,48 +365,40 @@ fn runner(mut app: App) -> AppExit {
         }
     }
 
-    let mut paused = false;
-    let mut exit = false;
-    app.world_mut()
-        .resource_mut::<EditorProcess>()
-        .to_editor
-        .send(GameMsg::ProcessInfo {
-            systems: disabled_systems.0.keys().cloned().collect(),
-        });
-    loop {
-        app.world_mut()
-            .resource_scope(|world, editor: Mut<EditorProcess>| {
-                let msgs_from_game = core::mem::take(&mut *editor.msg_queue.lock().unwrap());
-                for msg in msgs_from_game {
-                    match msg {
-                        EditorMsg::NextFrame => (),
-                        EditorMsg::WindowEvent(window_event) => world
-                            .run_system_cached_with(process_window_event, window_event)
-                            .unwrap(),
-                        EditorMsg::Pause => paused = true,
-                        EditorMsg::Continue => {
-                            paused = false;
-                        }
-                        EditorMsg::ModifySystem { name, state } => {
-                            if let Some(inner) = disabled_systems.0.get(&name) {
-                                inner.store(state, Ordering::SeqCst)
-                            }
-                        }
-                        EditorMsg::Exit => exit = true,
-                    }
-                }
-            });
-        // editor_app.update();
-        if !paused {
-            app.update();
-        }
-        if exit || app.should_exit().is_some() {
-            break;
-        }
-        // bevy::platform::thread::sleep(std::time::Duration::from_secs_f64(1.0 / 60.0));
-    }
+    editor.send(GameMsg::ProcessInfo {
+        systems: disabled_systems.0.keys().cloned().collect(),
+    });
+}
 
-    AppExit::Success
+fn react_to_editor_messages(
+    editor: Res<EditorProcess>,
+    mut sim_world: ResMut<SimulationWorld>,
+    mut windows_query_state: Local<Option<QueryState<&mut Window>>>,
+    mut runner_state: ResMut<RunnerState>,
+    disabled_systems: Res<DisabledSystems>,
+    mut msgs_queue: Local<Vec<EditorMsg>>,
+) {
+    editor.get_messages(&mut msgs_queue);
+    for msg in msgs_queue.drain(..) {
+        match msg {
+            EditorMsg::NextFrame => (),
+            EditorMsg::WindowEvent(window_event) => {
+                let windows =
+                    windows_query_state.get_or_insert_with(|| sim_world.query::<&mut Window>());
+                if let Err(e) = write_window_event(window_event, sim_world.as_mut(), windows) {
+                    error!("{e}");
+                }
+            }
+            EditorMsg::Pause => runner_state.paused = true,
+            EditorMsg::Continue => runner_state.paused = false,
+            EditorMsg::Exit => runner_state.exit = true,
+            EditorMsg::ModifySystem { name, state } => {
+                if let Some(inner) = disabled_systems.0.get(&name) {
+                    inner.store(state, Ordering::SeqCst)
+                }
+            }
+        }
+    }
 }
 
 struct WindowsTargets {
@@ -305,11 +414,11 @@ pub struct RenderTargets {
 }
 
 fn populate_window_retargets(
+    In(sender): In<IpcSender<GameMsg>>,
     mut manual_texture_views: ResMut<ManualTextureViews>,
     mut targets: ResMut<RenderTargets>,
     device: Res<RenderDevice>,
     windows: Query<(Entity, &Window), Changed<Window>>,
-    sender: Res<EditorProcess>,
 ) {
     for (window_e, window) in windows {
         if targets
@@ -370,7 +479,7 @@ fn populate_window_retargets(
             };
             targets.windows.insert(window_e, target);
         }
-        sender.to_editor.send(GameMsg::Image(texture_info)).unwrap();
+        sender.send(GameMsg::Image(texture_info)).unwrap();
     }
 }
 
