@@ -6,7 +6,7 @@ use bevy::{
     ui::Checked,
     window::WindowEvent,
 };
-use editor_api::{
+use editor_common::{
     GameProcess, GotSystems, ModifySystem, OutOfProcessPlugin, ViewportTargets,
     ViewportTextureCreated,
 };
@@ -192,7 +192,7 @@ pub fn send_events_to_game_viewport(
         };
 
         if computed_node.is_changed() {
-            game_proc.send(editor_api::EditorMsg::WindowEvent(
+            game_proc.send(editor_common::EditorMsg::WindowEvent(
                 WindowEvent::WindowResized(bevy::window::WindowResized {
                     window: window_e,
                     width: computed_node.size().x as f32,
@@ -269,7 +269,7 @@ pub fn send_events_to_game_viewport(
                 WindowEvent::KeyboardFocusLost(..) => (),
             };
 
-            game_proc.send(editor_api::EditorMsg::WindowEvent(event));
+            game_proc.send(editor_common::EditorMsg::WindowEvent(event));
         }
     }
 }

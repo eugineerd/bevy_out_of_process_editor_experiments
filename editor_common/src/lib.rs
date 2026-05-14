@@ -31,9 +31,6 @@ use serde::de::{DeserializeOwned, DeserializeSeed};
 use serde::{Deserialize, Serialize};
 
 mod external_texture;
-mod ipc;
-mod server_side;
-pub use server_side::*;
 use thiserror::Error;
 use wgpu::TextureViewDescriptor;
 
@@ -201,6 +198,8 @@ fn request<R: DeserializeOwned + core::fmt::Debug, T: Serialize + core::fmt::Deb
 }
 
 fn reset_scene() {
+    todo!()
+    /*
     let resp: BrpQueryResponse = request(
         BrpQueryParams {
             data: bevy::remote::builtin_methods::BrpQuery::default(),
@@ -218,9 +217,12 @@ fn reset_scene() {
             BRP_DESPAWN_COMPONENTS_METHOD,
         );
     }
+    */
 }
 
 fn spawn_editor_sync(world: &mut World, game: &mut GameProcess) {
+    todo!()
+    /*
     let resp: BrpQueryResponse = request(
         BrpQueryParams {
             data: bevy::remote::builtin_methods::BrpQuery::default(),
@@ -327,6 +329,7 @@ fn spawn_editor_sync(world: &mut World, game: &mut GameProcess) {
         sync_entity(game_entity, &mut game.entities_map, world);
     }
     game.reverse_entities_map = game.entities_map.iter().map(|(k, v)| (*v, *k)).collect();
+    */
 }
 
 #[derive(Default, Resource, ExtractResource, Clone, DerefMut, Deref)]

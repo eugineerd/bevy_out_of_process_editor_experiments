@@ -32,7 +32,7 @@ use bevy::{
     render::render_resource::{BufferDescriptor, BufferUsages, MapMode, TexelCopyBufferInfo},
 };
 
-use crate::{EDITOR_SERVER_NAME_VAR, EditorMsg, ExternalTexture, GameMsg};
+use editor_common::{EDITOR_SERVER_NAME_VAR, EditorMsg, ExternalTexture, GameMsg};
 
 #[derive(Default)]
 pub struct EditorIntegrationPlugin;

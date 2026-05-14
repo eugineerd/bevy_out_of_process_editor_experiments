@@ -1,11 +1,10 @@
 [package]
-name = "editor-api"
+name = "editor_integration"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-
 [dependencies]
+editor_common = {path = "../editor_common"}
 ash = "0.38.0"
 bevy = { workspace = true, features = ["dev", "bevy_remote", "bevy_feathers"] }
 ipc-channel = "0.22.0"

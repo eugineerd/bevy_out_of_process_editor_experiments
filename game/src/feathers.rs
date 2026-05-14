@@ -87,7 +87,7 @@ fn demo_root() -> impl Scene {
             flex_direction: FlexDirection::Row,
             column_gap: px(8),
         }
-        editor_api::EditorSync {}
+        editor_integration::EditorSync {}
         TabGroup
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children[

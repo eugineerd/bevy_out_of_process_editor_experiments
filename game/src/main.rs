@@ -3,7 +3,7 @@ use bevy::dev_tools::fps_overlay::FpsOverlayPlugin;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::feathers::FeathersPlugins;
 use bevy::prelude::*;
-use editor_api::EditorIntegrationPlugin;
+use editor_integration::EditorIntegrationPlugin;
 
 #[derive(Component)]
 pub struct DebugView;

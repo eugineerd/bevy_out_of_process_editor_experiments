@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 bevy = { workspace = true, features = ["bevy_feathers", "free_camera"] }
-editor-api = { path = "../editor-api" }
+editor_integration = { path = "../editor_integration" }

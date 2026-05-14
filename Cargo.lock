@@ -2425,15 +2425,32 @@ name = "editor"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "editor-api",
+ "editor_common",
 ]
 
 [[package]]
-name = "editor-api"
+name = "editor_common"
 version = "0.1.0"
 dependencies = [
  "ash",
  "bevy",
+ "ipc-channel",
+ "postcard",
+ "rand 0.10.1",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wgpu",
+]
+
+[[package]]
+name = "editor_integration"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "bevy",
+ "editor_common",
  "ipc-channel",
  "postcard",
  "rand 0.10.1",
@@ -2753,7 +2770,7 @@ name = "game"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "editor-api",
+ "editor_integration",
 ]
 
 [[package]]

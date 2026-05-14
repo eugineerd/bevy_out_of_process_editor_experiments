@@ -4,7 +4,7 @@
 # edition = "2024"
 
 [workspace]
-members = ["editor", "editor-api", "game"]
+members = ["editor", "editor_common", "editor_integration", "game"]
 resolver = "3"
 
 [workspace.dependencies]
