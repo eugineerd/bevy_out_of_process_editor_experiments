@@ -7,7 +7,7 @@ use bevy::camera::{
     ImageRenderTarget, ManualTextureViewHandle, NormalizedRenderTarget, RenderTarget,
 };
 use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
-use bevy::ecs::schedule::ScheduleLabel;
+use bevy::ecs::schedule::{ConditionWithAccess, ScheduleLabel};
 use bevy::platform::collections::HashMap;
 use bevy::platform::sync::Arc;
 use bevy::platform::sync::Mutex;
@@ -34,7 +34,7 @@ use bevy::{
     render::render_resource::{BufferDescriptor, BufferUsages, MapMode, TexelCopyBufferInfo},
 };
 
-use editor_common::{EDITOR_SERVER_NAME_VAR, EditorMsg, ExternalTexture, GameMsg};
+use editor_common::{EDITOR_SERVER_NAME_VAR, EditorMsg, ExternalTexture, GameMsg, ToggleSystem};
 
 #[derive(Default)]
 pub struct EditorIntegrationPlugin;
@@ -47,15 +47,18 @@ impl Plugin for EditorIntegrationPlugin {
         info!("Launching with editor integration");
 
         app.init_resource::<RenderTargets>(); // TODO: move to editor subapp
+        let registry = app.world().resource::<AppTypeRegistry>().clone();
 
         let editor_process = EditorProcess::new(&server_name);
         let mut sub_app = SubApp::new();
         sub_app
             .insert_resource(editor_process)
+            .insert_resource(registry)
             .init_resource::<RenderTargets>()
             .init_resource::<RunnerState>()
             .init_resource::<SimulationWorld>()
             .init_resource::<DisabledSystems>()
+            .add_observer(system_toggle_observer)
             .add_systems(IntegrationStartup, extract_systems)
             .add_systems(
                 PreSimulation,
@@ -272,7 +275,7 @@ pub struct PostSimulation;
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct IntegrationStartup;
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Deref, DerefMut)]
 pub struct DisabledSystems(HashMap<String, Arc<AtomicBool>>);
 
 fn run_schedule_with_simulation_world(
@@ -356,12 +359,11 @@ fn extract_systems(
             let system_name = systems.get(label).unwrap().name();
             let conditions = systems.get_conditions_mut(label).unwrap();
             let should_run = Arc::new(AtomicBool::new(true));
-            disabled_systems
-                .0
-                .insert(system_name.as_string(), should_run.clone());
-            conditions.push(bevy::ecs::schedule::ConditionWithAccess::new(Box::new(
-                IntoSystem::into_system(move || should_run.load(Ordering::Relaxed)),
-            )));
+            disabled_systems.insert(system_name.as_string(), should_run.clone());
+            let condition = Box::new(IntoSystem::into_system(move || {
+                should_run.load(Ordering::Relaxed)
+            }));
+            conditions.push(ConditionWithAccess::new(condition));
         }
     }
 
@@ -370,13 +372,20 @@ fn extract_systems(
     });
 }
 
+pub fn system_toggle_observer(on: On<ToggleSystem>, disabled_systems: Res<DisabledSystems>) {
+    if let Some(inner) = disabled_systems.0.get(&on.name) {
+        inner.store(on.state, Ordering::SeqCst)
+    }
+}
+
 fn react_to_editor_messages(
     editor: Res<EditorProcess>,
     mut sim_world: ResMut<SimulationWorld>,
     mut windows_query_state: Local<Option<QueryState<&mut Window>>>,
     mut runner_state: ResMut<RunnerState>,
-    disabled_systems: Res<DisabledSystems>,
     mut msgs_queue: Local<Vec<EditorMsg>>,
+    mut commands: Commands,
+    registry: Res<AppTypeRegistry>,
 ) {
     editor.get_messages(&mut msgs_queue);
     for msg in msgs_queue.drain(..) {
@@ -392,10 +401,11 @@ fn react_to_editor_messages(
             EditorMsg::Pause => runner_state.paused = true,
             EditorMsg::Continue => runner_state.paused = false,
             EditorMsg::Exit => runner_state.exit = true,
-            EditorMsg::ModifySystem { name, state } => {
-                if let Some(inner) = disabled_systems.0.get(&name) {
-                    inner.store(state, Ordering::SeqCst)
-                }
+            EditorMsg::ReflectedEvent(event) => {
+                let registry = registry.clone();
+                commands.queue(move |world: &mut World| {
+                    event.trigger(&registry.read(), world);
+                });
             }
         }
     }

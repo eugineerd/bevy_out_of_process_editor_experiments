@@ -9,6 +9,10 @@ use bevy::asset::RenderAssetUsages;
 use bevy::input::common_conditions;
 use bevy::platform::collections::HashMap;
 use bevy::platform::sync::Mutex;
+use bevy::reflect::TypeRegistry;
+use bevy::reflect::serde::{
+    ReflectDeserializer, ReflectSerializer, TypedReflectDeserializer, TypedReflectSerializer,
+};
 use bevy::remote::builtin_methods::{
     BRP_DESPAWN_COMPONENTS_METHOD, BRP_GET_COMPONENTS_METHOD, BRP_LIST_COMPONENTS_METHOD,
     BRP_QUERY_METHOD, BrpGetComponentsParams, BrpGetComponentsResponse, BrpListComponentsParams,
@@ -48,7 +52,6 @@ impl Plugin for OutOfProcessPlugin {
                 })
                 .run_if(common_conditions::input_just_pressed(KeyCode::KeyU)),
             )
-            .add_observer(ModifySystem::observer)
             .add_observer(ViewportTextureUpdate::observer)
             .add_systems(PreUpdate, sync_world);
     }
@@ -86,6 +89,7 @@ pub struct StartGameProcess {}
 fn start_game_process_observer(
     _on: On<StartGameProcess>,
     mut commands: Commands,
+    registry: Res<AppTypeRegistry>,
     game: Option<ResMut<GameProcess>>,
 ) {
     let path = "/workspaces/bevy-editor-experiments";
@@ -123,7 +127,7 @@ fn start_game_process_observer(
         reverse_entities_map: Default::default(),
         proc: game_proc,
         to_game: sender,
-        // from_game: Mutex::new(reciver),
+        registry: registry.clone(),
         msg_queue,
         systems: Default::default(),
     };
@@ -146,7 +150,7 @@ pub struct GameProcess {
     reverse_entities_map: HashMap<Entity, Entity>,
     proc: std::process::Child,
     to_game: IpcSender<EditorMsg>,
-    // from_game: Mutex<IpcReceiver<GameMsg>>,
+    registry: AppTypeRegistry,
     msg_queue: Arc<Mutex<Vec<GameMsg>>>,
     pub systems: HashMap<String, RemoteSystem>,
 }
@@ -156,6 +160,11 @@ impl GameProcess {
         if let Err(e) = self.to_game.send(msg) {
             error!("Sending faild: {e}");
         }
+    }
+
+    pub fn trigger(&self, event: impl Event + Reflect) {
+        let event = ReflectedEvent::serialize_event(&self.registry.read(), event);
+        self.send(event.into());
     }
 
     pub fn get_messages(&self, swap_to: &mut Vec<GameMsg>) {
@@ -433,21 +442,6 @@ impl ViewportTextureUpdate {
     }
 }
 
-#[derive(Event)]
-pub struct ModifySystem {
-    pub name: String,
-    pub state: bool,
-}
-
-impl ModifySystem {
-    pub fn observer(on: On<Self>, game: Res<GameProcess>) {
-        game.send(EditorMsg::ModifySystem {
-            name: on.name.clone(),
-            state: on.state,
-        })
-    }
-}
-
 /*
 pub fn update_scene(ast: &mut SceneJsnAst) {
     for &entity_idx in &ast.dirty_indices {
@@ -485,16 +479,55 @@ pub fn update_scene(ast: &mut SceneJsnAst) {
 }
  */
 
+#[derive(Event, Reflect, Serialize, Deserialize)]
+#[reflect(Event, Serialize, Deserialize)]
+pub struct ToggleSystem {
+    pub name: String,
+    pub state: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReflectedEvent {
+    id: String,
+    data: Vec<u8>,
+}
+
+impl ReflectedEvent {
+    pub fn serialize_event(registry: &TypeRegistry, event: impl Event + Reflect) -> Self {
+        let type_path = event.reflect_type_path().to_string();
+        let serializer = TypedReflectSerializer::new(event.as_partial_reflect(), registry);
+        ReflectedEvent {
+            id: type_path,
+            data: postcard::to_allocvec(&serializer).unwrap(),
+        }
+    }
+
+    pub fn trigger(self, registry: &TypeRegistry, world: &mut World) {
+        let registration = registry.get_with_type_path(&self.id).unwrap();
+        let reflect_event = registration.data::<ReflectEvent>().unwrap();
+        let deserializer = TypedReflectDeserializer::new(registration, registry);
+        let mut data = postcard::Deserializer::from_bytes(&self.data);
+        let event = deserializer.deserialize(&mut data).unwrap();
+        reflect_event.trigger(world, event.as_partial_reflect(), registry);
+    }
+}
+
+impl From<ReflectedEvent> for EditorMsg {
+    fn from(value: ReflectedEvent) -> Self {
+        EditorMsg::ReflectedEvent(value)
+    }
+}
+
 pub const EDITOR_SERVER_NAME_VAR: &'static str = "BEVY_EDITOR_SERVER_NAME";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorMsg {
     NextFrame,
-    WindowEvent(WindowEvent),
-    ModifySystem { name: String, state: bool },
     Exit,
     Pause,
     Continue,
+    WindowEvent(WindowEvent),
+    ReflectedEvent(ReflectedEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,6 +535,7 @@ pub enum GameMsg {
     Sender(IpcSender<EditorMsg>),
     Image(ExternalTextureInfo),
     ProcessInfo { systems: Vec<String> },
+    ReflectedEvent(ReflectedEvent),
 }
 
 #[derive(Error, Debug)]

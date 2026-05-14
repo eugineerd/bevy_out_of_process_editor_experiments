@@ -7,7 +7,7 @@ use bevy::{
     window::WindowEvent,
 };
 use editor_common::{
-    GameProcess, GotSystems, ModifySystem, OutOfProcessPlugin, ViewportTargets,
+    GameProcess, GotSystems, OutOfProcessPlugin, ToggleSystem, ViewportTargets,
     ViewportTextureCreated,
 };
 
@@ -87,14 +87,15 @@ fn system_menu(game: Res<GameProcess>) -> impl Scene {
                 Checked
                 on(
                     move |change: On<bevy::ui_widgets::ValueChange<bool>>,
-                        mut commands: Commands| {
+                        mut commands: Commands,
+                        game: Res<GameProcess> | {
                         let mut checkbox = commands.entity(change.source);
                         if change.value {
                             checkbox.insert(Checked);
                         } else {
                             checkbox.remove::<Checked>();
                         }
-                        commands.trigger(ModifySystem{
+                        game.trigger(ToggleSystem {
                             name: name.clone(),
                             state: change.value
                         })
