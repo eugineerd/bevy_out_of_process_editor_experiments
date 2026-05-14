@@ -1,40 +1,24 @@
-use core::mem;
-use std::time::Duration;
-
-use bevy::app::{AppLabel, MainSchedulePlugin};
-use bevy::asset::RenderAssetUsages;
-use bevy::camera::{
-    ImageRenderTarget, ManualTextureViewHandle, NormalizedRenderTarget, RenderTarget,
-};
-use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
+use bevy::app::AppExit;
+use bevy::app::AppLabel;
+use bevy::camera::{ManualTextureViewHandle, RenderTarget};
+use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::schedule::{ConditionWithAccess, ScheduleLabel};
 use bevy::platform::collections::HashMap;
-use bevy::platform::sync::Arc;
-use bevy::platform::sync::Mutex;
 use bevy::platform::sync::atomic::AtomicBool;
 use bevy::platform::sync::atomic::Ordering;
+use bevy::platform::sync::{Arc, Mutex};
 use bevy::prelude::*;
-use bevy::render::camera::{ExtractedCamera, extract_cameras};
-use bevy::render::render_asset::{RenderAsset, RenderAssets};
-use bevy::render::render_resource::{
-    Buffer, CommandEncoderDescriptor, Extent3d, PollType, TexelCopyBufferLayout, TextureDimension,
-    TextureFormat, TextureUsages,
-};
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
-use bevy::render::texture::{GpuImage, ManualTextureView};
-use bevy::render::view::screenshot::Screenshot;
-use bevy::render::{Extract, MainWorld, Render, RenderApp, RenderPlugin, RenderSystems};
-use bevy::tasks::ComputeTaskPool;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::renderer::RenderDevice;
+use bevy::render::texture::ManualTextureView;
 use bevy::window::{PrimaryWindow, WindowEvent};
-use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
+use core::mem;
+use ipc_channel::ipc::{self, IpcSender};
 use serde::{Deserialize, Serialize};
 
-use bevy::{
-    app::AppExit,
-    render::render_resource::{BufferDescriptor, BufferUsages, MapMode, TexelCopyBufferInfo},
+use editor_common::{
+    EDITOR_SERVER_NAME_VAR, EditorMsg, ExternalTexture, GameMsg, ToggleSystemEvent,
 };
-
-use editor_common::{EDITOR_SERVER_NAME_VAR, EditorMsg, ExternalTexture, GameMsg, ToggleSystem};
 
 #[derive(Default)]
 pub struct EditorIntegrationPlugin;
@@ -367,12 +351,12 @@ fn extract_systems(
         }
     }
 
-    editor.send(GameMsg::ProcessInfo {
+    editor.send(GameMsg::WorldInfo {
         systems: disabled_systems.0.keys().cloned().collect(),
     });
 }
 
-pub fn system_toggle_observer(on: On<ToggleSystem>, disabled_systems: Res<DisabledSystems>) {
+pub fn system_toggle_observer(on: On<ToggleSystemEvent>, disabled_systems: Res<DisabledSystems>) {
     if let Some(inner) = disabled_systems.0.get(&on.name) {
         inner.store(on.state, Ordering::SeqCst)
     }

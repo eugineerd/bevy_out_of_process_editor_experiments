@@ -1,4 +1,4 @@
-//! # LLM-GENERATED!
+//! # LLM-GENERATED, PLEASE REPLACE
 //!
 //! Cross-process wgpu texture sharing via Vulkan `VK_KHR_external_memory`.
 //!

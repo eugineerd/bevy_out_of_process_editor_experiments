@@ -7,8 +7,8 @@ use bevy::{
     window::WindowEvent,
 };
 use editor_common::{
-    GameProcess, GotSystems, OutOfProcessPlugin, ToggleSystem, ViewportTargets,
-    ViewportTextureCreated,
+    GameProcess, GotSystems, OutOfProcessPlugin, StartGameProcess, ToggleSystemEvent,
+    ViewportTargets, ViewportTextureCreated,
 };
 
 fn main() -> AppExit {
@@ -24,6 +24,7 @@ fn main() -> AppExit {
             FpsOverlayPlugin::default(),
         ))
         .add_systems(PostStartup, setup)
+        .add_systems(PreUpdate, controls)
         .add_systems(Update, send_events_to_game_viewport)
         .add_observer(
             |_on: On<GotSystems>,
@@ -95,7 +96,7 @@ fn system_menu(game: Res<GameProcess>) -> impl Scene {
                         } else {
                             checkbox.remove::<Checked>();
                         }
-                        game.trigger(ToggleSystem {
+                        game.trigger(ToggleSystemEvent {
                             name: name.clone(),
                             state: change.value
                         })
@@ -271,6 +272,26 @@ pub fn send_events_to_game_viewport(
             };
 
             game_proc.send(editor_common::EditorMsg::WindowEvent(event));
+        }
+    }
+}
+
+fn controls(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    game: Option<Res<GameProcess>>,
+) {
+    if keys.just_pressed(KeyCode::KeyU) {
+        commands.trigger(StartGameProcess {
+            workspace_path: "game".into(),
+        });
+    }
+    if let Some(game) = game {
+        if keys.just_pressed(KeyCode::KeyP) {
+            game.send(editor_common::EditorMsg::Pause);
+        }
+        if keys.just_pressed(KeyCode::KeyO) {
+            game.send(editor_common::EditorMsg::Continue);
         }
     }
 }
